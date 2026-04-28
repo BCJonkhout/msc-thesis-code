@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# Tooling caches
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Experiment outputs (ledgers, embeddings, trees, graphs, evaluation results)
+outputs/*
+!outputs/.gitkeep
+
+# Datasets and prepared splits — kept locally, not committed
+data/
+
+# Model weight downloads
+weights/
+*.safetensors
+*.gguf
+
+# Run logs
+runs/
+
+# Secrets / API keys
+.env
+.env.*
+!.env.example
+
+# Notebook artifacts
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
