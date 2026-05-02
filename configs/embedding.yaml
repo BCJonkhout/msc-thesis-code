@@ -18,6 +18,16 @@ default:
   license: Apache-2.0
   vector_store: faiss-cpu
   vector_store_source: pilot:4.4
+  served_via: ollama
+  served_via_source: rule:local-inference-stack
+  status: locked
+  status_source: empirical:step_3_encoder_recall_2026-05-02
+  status_detail: >
+    BGE-M3 served via Ollama (model id `bge-m3`) passes the
+    Recall@20 ≥ 0.85 gate on the QASPER 20-question calibration
+    pool: macro Recall@5=0.740, Recall@10=0.855, Recall@20=0.863.
+    No escalation candidate (e5-mistral, arctic-embed-l-v2.0,
+    NV-Embed-v2, voyage-3-large) needs to run.
 
 # ─── Escalation chain (only triggered if default fails Recall@20 gate) ────────
 escalation:
