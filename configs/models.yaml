@@ -6,20 +6,6 @@
 
 # ─── Closed answerer slate (enter smoke) ──────────────────────────────────────
 closed_candidates:
-  - id: claude-sonnet-4-6
-    provider: anthropic
-    context_window_tokens: 1000000
-    cache_tier: 1h_extended
-    cache_tier_source: provider:platform.claude.com/docs/en/build-with-claude/prompt-caching
-    source: pilot:5.8#6
-
-  - id: claude-opus-4-7
-    provider: anthropic
-    context_window_tokens: 1000000
-    cache_tier: 1h_extended
-    cache_tier_source: provider:platform.claude.com/docs/en/build-with-claude/prompt-caching
-    source: pilot:5.8#6
-
   - id: gemini-3.1-pro-preview
     provider: google
     context_window_tokens: 1000000
@@ -46,13 +32,6 @@ closed_candidates:
     cache_tier_source: provider:ai.google.dev/gemini-api/docs/caching
     source: pilot:5.8#6
     notes: Alias to current best Gemini Flash; auto-advances as Google ships revisions.
-
-  - id: gpt-5.4
-    provider: openai
-    context_window_tokens: 1050000
-    cache_tier: 24h_extended  # GPT-5.1+ via prompt_cache_retention=24h
-    cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
-    source: pilot:5.8#6
 
   - id: grok-4.3
     provider: xai
@@ -202,6 +181,71 @@ rejected_candidates:
     rejection_source: pilot:5.8#5
     rejection_detail: >
       Same reason as gemma-4-26b-a4b-it.
+
+  - id: claude-sonnet-4-6
+    provider: anthropic
+    context_window_tokens: 1000000
+    license: closed
+    rejection_reason: rate_limit_blocks_multi_call_workload
+    rejection_source: empirical:step_2_kvcache_2026-05-02
+    rejection_detail: >
+      Anthropic's account-tier rate limit (30,000 input tokens per
+      minute, rolling) is structurally incompatible with the
+      repeated-context workload pattern this pilot measures: the cost
+      model assumes many consecutive queries against the same long
+      document, and Step 2 KV-cache verification exercises that pattern
+      at minimum scale. Two consecutive 100k-token verification calls
+      blew the rate limit (RateLimitError 429 on call 2). Even after a
+      credit top-up the structural rate-limit cap persisted: the limit
+      is on input-token throughput, not on credits. A higher Anthropic
+      tier would lift the cap but is not available on this account.
+      The pilot's amortization-of-document-cost claim cannot be
+      empirically demonstrated on Anthropic without exceeding the
+      tier limit, which would make full-NovelQA runs operationally
+      fragile and inflate wall-clock latency through forced waits.
+      Therefore the entire Anthropic family is removed from the active
+      slate. Reinstateable on a higher Anthropic tier; the cache
+      primitive itself (cache_control: ephemeral; 1h extended tier)
+      is documented to work and would not need re-verification on a
+      higher tier.
+
+  - id: claude-opus-4-7
+    provider: anthropic
+    context_window_tokens: 1000000
+    license: closed
+    rejection_reason: malformed_at_150k_plus_account_tier_limit
+    rejection_source: empirical:step_1_smoke_2026-05-02
+    rejection_detail: >
+      Empirical Step 1 smoke (2026-05-02): 5k passed cleanly after the
+      temperature-deprecation fix (Opus 4.7 deprecates the temperature
+      parameter; the adapter omits both temperature and top_p for this
+      model id). 150k returned an empty string with output_tokens=0 on
+      synthetic Lorem-Ipsum content, suggesting the model refuses to
+      produce output on highly repetitive prompts. 600k returned
+      RateLimitError 429: "request would exceed your organization's
+      rate limit of 30,000 input tokens per minute" — a single 600k
+      request structurally cannot fit in a 60s window at this account
+      tier. Two failure modes compound: empty-response on synthetic
+      data and a hard account-tier ceiling that would make NovelQA
+      runs operationally fragile. Reinstateable on a higher Anthropic
+      tier with a Step 3 retest on real semantic content.
+
+  - id: gpt-5.4
+    provider: openai
+    context_window_tokens: 1050000
+    license: closed
+    rejection_reason: account_tier_blocks_long_context
+    rejection_source: empirical:step_1_smoke_2026-05-02
+    rejection_detail: >
+      Empirical Step 1 smoke (2026-05-02): 5k and 150k passed cleanly.
+      600k returned RateLimitError 429: "Request too large for gpt-5.4
+      (for limit gpt-5.4-long-context) in organization org-..." This
+      is an account-tier limit, not a model capability issue. Single
+      600k requests are blocked at the tier level, which makes
+      full-NovelQA runs (most novels >500k post-B48 exclusion)
+      structurally infeasible. Reinstateable with a higher OpenAI
+      tier or by restricting GPT-5.4's role to QASPER-only rows in
+      Phase F.
 
   - id: gpt-5.5
     provider: openai

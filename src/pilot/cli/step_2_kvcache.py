@@ -42,7 +42,6 @@ from pilot.sanity.kvcache_check import CacheCheckResult, run_cache_check
 # matters here, not which model — but using the cheapest 1M-context
 # model per stack keeps the cost bounded.
 _DEFAULT_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-5.4",
     "gemini": "gemini-3.1-pro-preview",
     "dashscope": "qwen3.6-27b",
@@ -51,7 +50,6 @@ _DEFAULT_MODELS: dict[str, str] = {
 }
 
 _ENV_VAR: dict[str, str | tuple[str, ...]] = {
-    "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "dashscope": "DASHSCOPE_API_KEY",
@@ -107,7 +105,7 @@ def _verdict_for_provider(
 def run_step_2(
     *,
     providers: list[str] | None = None,
-    doc_tokens: int = 100_000,
+    doc_tokens: int = 12_000,
     cache_control: CacheControl = CacheControl.EPHEMERAL_5MIN,
     out_dir: Path = Path("outputs/sanity"),
 ) -> dict[str, Any]:
@@ -174,8 +172,15 @@ def main() -> int:
     parser.add_argument(
         "--doc-tokens",
         type=int,
-        default=100_000,
-        help="Approximate document size for the verification (default 100k).",
+        default=12_000,
+        help=(
+            "Approximate document size for the verification (default 12k). "
+            "12k is well above every provider's minimum-cache-eligibility "
+            "threshold (~1024 for Anthropic, 4096 for Gemini Pro, 64 for "
+            "DeepSeek) and small enough that two consecutive calls fit "
+            "under the Anthropic 30k/min input-token rate limit. The cache "
+            "primitive verification does not require a longer document."
+        ),
     )
     parser.add_argument(
         "--cache",

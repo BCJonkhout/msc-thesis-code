@@ -65,7 +65,7 @@ def test_no_keys_returns_all_skipped(tmp_path: Path) -> None:
 
     assert summary["providers_tested"] == []
     assert set(summary["providers_skipped"]) == {
-        "anthropic", "openai", "gemini", "dashscope", "openrouter", "xai"
+        "openai", "gemini", "dashscope", "openrouter", "xai"
     }
     assert summary["all_passed"] is False
     assert summary["any_passed"] is False
@@ -78,12 +78,12 @@ def test_no_keys_returns_all_skipped(tmp_path: Path) -> None:
 
 def test_one_provider_passes(tmp_path: Path) -> None:
     """One provider has a key and passes; others are skipped."""
-    env = {"ANTHROPIC_API_KEY": "fake-key"}
+    env = {"OPENAI_API_KEY": "fake-key"}
     with patch.dict(os.environ, env, clear=True):
         with patch.object(
             step_2_kvcache,
             "run_cache_check",
-            return_value=_fake_pass_result("anthropic", "claude-sonnet-4-6-20260217"),
+            return_value=_fake_pass_result("openai", "gpt-5.4"),
         ):
             summary = step_2_kvcache.run_step_2(
                 doc_tokens=1000,
@@ -91,19 +91,19 @@ def test_one_provider_passes(tmp_path: Path) -> None:
                 out_dir=tmp_path,
             )
 
-    assert summary["providers_tested"] == ["anthropic"]
+    assert summary["providers_tested"] == ["openai"]
     assert summary["all_passed"] is True
-    anthropic_entry = next(p for p in summary["per_provider"] if p["provider"] == "anthropic")
-    assert anthropic_entry["status"] == "pass"
-    assert anthropic_entry["result"]["overall_pass"] is True
+    openai_entry = next(p for p in summary["per_provider"] if p["provider"] == "openai")
+    assert openai_entry["status"] == "pass"
+    assert openai_entry["result"]["overall_pass"] is True
 
 
 def test_one_passes_one_fails(tmp_path: Path) -> None:
     """Mixed verdict: one provider passes, one fails. all_passed=False, any_passed=True."""
-    env = {"ANTHROPIC_API_KEY": "fake-a", "OPENAI_API_KEY": "fake-b"}
+    env = {"OPENAI_API_KEY": "fake-a", "XAI_API_KEY": "fake-b"}
 
     def fake_check(*, provider_name: str, model: str, **_kwargs):
-        if provider_name == "anthropic":
+        if provider_name == "openai":
             return _fake_pass_result(provider_name, model)
         return _fake_fail_result(provider_name, model)
 
@@ -115,12 +115,12 @@ def test_one_passes_one_fails(tmp_path: Path) -> None:
                 out_dir=tmp_path,
             )
 
-    assert set(summary["providers_tested"]) == {"anthropic", "openai"}
+    assert set(summary["providers_tested"]) == {"openai", "xai"}
     assert summary["all_passed"] is False
     assert summary["any_passed"] is True
     statuses = {p["provider"]: p["status"] for p in summary["per_provider"] if "status" in p}
-    assert statuses["anthropic"] == "pass"
-    assert statuses["openai"] == "fail"
+    assert statuses["openai"] == "pass"
+    assert statuses["xai"] == "fail"
 
 
 def test_provider_exception_recorded_as_error(tmp_path: Path) -> None:
@@ -146,19 +146,19 @@ def test_provider_exception_recorded_as_error(tmp_path: Path) -> None:
 
 def test_provider_subset_filter(tmp_path: Path) -> None:
     """`providers=` argument restricts which adapters are walked."""
-    env = {"ANTHROPIC_API_KEY": "fake", "OPENAI_API_KEY": "fake"}
+    env = {"OPENAI_API_KEY": "fake", "XAI_API_KEY": "fake"}
     with patch.dict(os.environ, env, clear=True):
         with patch.object(
             step_2_kvcache,
             "run_cache_check",
-            return_value=_fake_pass_result("anthropic", "claude-sonnet-4-6-20260217"),
+            return_value=_fake_pass_result("openai", "gpt-5.4"),
         ):
             summary = step_2_kvcache.run_step_2(
-                providers=["anthropic"],
+                providers=["openai"],
                 doc_tokens=1000,
                 cache_control=CacheControl.EPHEMERAL_5MIN,
                 out_dir=tmp_path,
             )
 
-    assert summary["providers_requested"] == ["anthropic"]
-    assert {p["provider"] for p in summary["per_provider"]} == {"anthropic"}
+    assert summary["providers_requested"] == ["openai"]
+    assert {p["provider"] for p in summary["per_provider"]} == {"openai"}
