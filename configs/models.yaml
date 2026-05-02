@@ -56,21 +56,17 @@ closed_candidates:
 
   - id: grok-4.3
     provider: xai
-    context_window_tokens: 256000  # verify on first call; xAI docs needed
-    context_window_verification_required: true
+    context_window_tokens: 2000000  # xAI Grok-4 family documented at 2M tokens
     cache_tier: automatic_via_xai
     cache_tier_source: provider:x.ai/api
     source: pilot:5.8#6
     notes: >
       xAI's flagship reasoning model. Grok is closed-weights; this is
-      a fourth closed-frontier vendor in the cross-model check. Context
-      window per xAI's documentation must be verified — Grok 4.x family
-      has historically capped well below 1M.
+      a fourth closed-frontier vendor in the cross-model check.
 
   - id: grok-4-1-fast-non-reasoning
     provider: xai
-    context_window_tokens: 256000
-    context_window_verification_required: true
+    context_window_tokens: 2000000
     cache_tier: automatic_via_xai
     cache_tier_source: provider:x.ai/api
     source: pilot:5.8#6
@@ -78,8 +74,7 @@ closed_candidates:
 
   - id: grok-4-fast-reasoning
     provider: xai
-    context_window_tokens: 256000
-    context_window_verification_required: true
+    context_window_tokens: 2000000
     cache_tier: automatic_via_xai
     cache_tier_source: provider:x.ai/api
     source: pilot:5.8#6
@@ -87,8 +82,7 @@ closed_candidates:
 
   - id: grok-4.20-0309-non-reasoning
     provider: xai
-    context_window_tokens: 256000
-    context_window_verification_required: true
+    context_window_tokens: 2000000
     cache_tier: automatic_via_xai
     cache_tier_source: provider:x.ai/api
     source: pilot:5.8#6
@@ -96,8 +90,7 @@ closed_candidates:
 
   - id: grok-4.20-0309-reasoning
     provider: xai
-    context_window_tokens: 256000
-    context_window_verification_required: true
+    context_window_tokens: 2000000
     cache_tier: automatic_via_xai
     cache_tier_source: provider:x.ai/api
     source: pilot:5.8#6
