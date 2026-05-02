@@ -46,13 +46,21 @@ class OpenAIProvider(AnswererProvider):
             extra_kwargs["prompt_cache_retention"] = "24h"
         # OpenAI's automatic caching cannot be turned off; DISABLED is best-effort.
 
+        # GPT-5+ models require `max_completion_tokens` and reject the
+        # legacy `max_tokens`. Older OpenAI models accept either. We
+        # send max_completion_tokens unconditionally for the OpenAI
+        # direct adapter — the OpenAI-compatible adapter (used for
+        # OpenRouter, xAI, Groq) keeps `max_tokens` because those
+        # gateways follow the older convention.
+        max_param = max_tokens if max_tokens is not None else 1024
+
         start = time.perf_counter()
         response = self._client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
             top_p=top_p,
-            max_tokens=max_tokens if max_tokens is not None else 1024,
+            max_completion_tokens=max_param,
             **extra_kwargs,
         )
         elapsed = time.perf_counter() - start

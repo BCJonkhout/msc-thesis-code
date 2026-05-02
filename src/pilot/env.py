@@ -1,9 +1,14 @@
 """Auto-load environment variables from `.env` files.
 
 Looks for `.env` first in the code/ root (one level up from this
-package), then in the current working directory. Existing process
-environment variables take precedence — `.env` only fills in missing
-keys, never overrides what's already set.
+package), then in the current working directory.
+
+**`.env` overrides process environment by default.** This is the
+opposite of the standard dotenv default — but it's the right choice
+here because the user iterates on `.env` (rotating keys, adding new
+providers) while the parent shell may be hours or days old with
+stale exported values. If you genuinely want process env to win,
+pass `override=False`.
 
 This is called once at import time when any CLI module runs. The
 load is idempotent.
@@ -20,7 +25,7 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def load_env() -> list[Path]:
+def load_env(*, override: bool = True) -> list[Path]:
     """Load .env files. Returns the list of files actually loaded."""
     candidates = [
         _project_root() / ".env",
@@ -29,6 +34,6 @@ def load_env() -> list[Path]:
     loaded: list[Path] = []
     for path in candidates:
         if path.exists() and path.resolve() not in {p.resolve() for p in loaded}:
-            load_dotenv(path, override=False)
+            load_dotenv(path, override=override)
             loaded.append(path)
     return loaded

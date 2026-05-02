@@ -67,7 +67,7 @@ providers:
         output: 25.00
 
   openai:
-    snapshot_date: 2026-04-29
+    snapshot_date: 2026-05-02
     source: provider:developers.openai.com/api/docs/guides/prompt-caching
     cache_ttl_minutes:
       automatic_default: 60   # short-window observed; verify per-account
@@ -77,9 +77,36 @@ providers:
       gpt-5.4:
         input_uncached_below_272k: 2.50
         input_uncached_above_272k: 5.00
-        input_cached_read: 0.25  # automatic prefix caching ~10% of base
+        input_cached_read: 0.25
         output_below_272k: 15.00
         output_above_272k: 22.50
+        context_window_tokens: 1050000
+        source: provider:developers.openai.com/api/docs/models/gpt-5.4
+
+      gpt-5.4-pro:
+        input_uncached: 15.00      # verify; pro tier typically 3x base
+        input_cached_read: 1.50
+        output: 90.00
+        context_window_tokens: 1050000
+        verification_required: true
+        source: provider:developers.openai.com/api/docs/models/gpt-5.4-pro
+
+      gpt-5.5:
+        input_uncached_below_272k: 5.00
+        input_uncached_above_272k: 10.00
+        input_cached_read: 0.50
+        output_below_272k: 30.00
+        output_above_272k: 45.00
+        context_window_tokens: 1050000
+        source: provider:developers.openai.com/api/docs/models/gpt-5.5
+
+      gpt-5.5-pro:
+        input_uncached: 30.00
+        input_cached_read: 3.00      # verify; cache discount typically 10%
+        output: 180.00
+        context_window_tokens: 1050000
+        verification_required: true
+        source: provider:developers.openai.com/api/docs/models/gpt-5.5-pro
 
   google:
     snapshot_date: 2026-04-29
@@ -102,7 +129,7 @@ providers:
     cache_ttl_minutes:
       ephemeral_only: 5  # NO extended tier; binding constraint per audit
     cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
-    status: not_accessible  # user does not have DashScope access
+    status: not_accessible  # DashScope not used in this setup
     models:
       qwen3.6-27b:
         input_uncached: 0.80    # verify on first call; placeholder
@@ -110,9 +137,56 @@ providers:
         output: 1.20            # verify on first call; placeholder
         verification_required: true
 
+  xai:
+    snapshot_date: 2026-05-02
+    source: provider:docs.x.ai/docs/api-reference
+    cache_ttl_minutes:
+      automatic_default: 60  # verify; xAI exposes automatic caching, TTL not publicly documented
+    cache_ttl_source: provider:openrouter.ai/docs/guides/best-practices/prompt-caching
+    notes: >
+      xAI cache-tier TTL is not publicly documented; OpenRouter lists xAI
+      under automatic-caching providers but doesn't specify the window.
+      Verification on first KV-cache check.
+    models:
+      grok-4.3:
+        input_uncached: 3.00      # verify on first call
+        input_cached_read: 0.30   # verify
+        output: 15.00             # verify
+        context_window_tokens: 256000
+        verification_required: true
+        source: provider:docs.x.ai/docs/api-reference
+
+      grok-4-1-fast-non-reasoning:
+        input_uncached: 0.50      # verify
+        input_cached_read: 0.05
+        output: 1.50
+        context_window_tokens: 256000
+        verification_required: true
+
+      grok-4-fast-reasoning:
+        input_uncached: 0.50
+        input_cached_read: 0.05
+        output: 1.50
+        context_window_tokens: 256000
+        verification_required: true
+
+      grok-4.20-0309-non-reasoning:
+        input_uncached: 1.00
+        input_cached_read: 0.10
+        output: 5.00
+        context_window_tokens: 256000
+        verification_required: true
+
+      grok-4.20-0309-reasoning:
+        input_uncached: 1.00
+        input_cached_read: 0.10
+        output: 5.00
+        context_window_tokens: 256000
+        verification_required: true
+
   openrouter:
     snapshot_date: 2026-05-02
-    source: provider:openrouter.ai/qwen/qwen3.6-flash
+    source: provider:openrouter.ai/api/v1/models
     cache_ttl_minutes:
       varies_by_route: true  # OpenRouter routes to underlying providers
     cache_ttl_source: provider:openrouter.ai/docs/quickstart
@@ -124,18 +198,32 @@ providers:
       should be verified at run time via the per-row
       `cached_input_tokens` field.
     models:
-      qwen/qwen3.6-flash:
-        input_uncached_below_256k: 0.25
-        input_uncached_above_256k_tier_factor: 2.0  # placeholder; verify at run time
-        input_cached_read: 0.10  # placeholder; varies by route
-        output_below_256k: 1.50
-        verification_required: true
+      deepseek/deepseek-v4-pro:
+        input_uncached: 0.43
+        input_cached_read: 0.004
+        output: 0.87
+        context_window_tokens: 1048576
+        source: provider:openrouter.ai/deepseek/deepseek-v4-pro
         notes: >
-          Tiered pricing kicks in above 256k tokens. Surcharge factor
-          is a placeholder until verified on the first 600k smoke call.
-          For the cross-model subsample (10 novels of up to 772k each),
-          expect roughly 30-50% of input volume to fall in the upper
-          tier.
+          Cache-read price is 1/100th of uncached input — repeated-context
+          inference becomes nearly free at scale on this row.
+
+      deepseek/deepseek-v4-flash:
+        input_uncached: 0.14
+        input_cached_read: 0.003
+        output: 0.28
+        context_window_tokens: 1048576
+        source: provider:openrouter.ai/deepseek/deepseek-v4-flash
+        notes: Cheaper DeepSeek-V4 variant; same long-context window.
+
+      moonshotai/kimi-k2.6:
+        input_uncached: 0.60      # verify on first call
+        input_cached_read: 0.15   # verify
+        output: 2.50              # verify
+        context_window_tokens: 262142
+        verification_required: true
+        source: provider:openrouter.ai/moonshotai/kimi-k2.6
+        notes: 256k context cap. Restricted to QASPER + truncated NovelQA.
 
 # ─── Embedding rate cards (closed APIs only; open-weights = local GPU) ────────
 embedding_providers:

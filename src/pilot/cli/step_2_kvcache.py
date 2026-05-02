@@ -46,7 +46,8 @@ _DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4",
     "gemini": "gemini-3.1-pro-preview",
     "dashscope": "qwen3.6-27b",
-    "openrouter": "qwen/qwen3.6-flash",
+    "openrouter": "deepseek/deepseek-v4-pro",  # was qwen3.6-flash; replaced because Qwen routes don't expose caching
+    "xai": "grok-4.3",
 }
 
 _ENV_VAR: dict[str, str | tuple[str, ...]] = {
@@ -55,6 +56,7 @@ _ENV_VAR: dict[str, str | tuple[str, ...]] = {
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "dashscope": "DASHSCOPE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "xai": "XAI_API_KEY",
 }
 
 
@@ -164,6 +166,12 @@ def main() -> int:
         help="Subset of providers to verify (default: all).",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="Override the default model for the chosen provider "
+             "(only meaningful when --providers selects exactly one).",
+    )
+    parser.add_argument(
         "--doc-tokens",
         type=int,
         default=100_000,
@@ -183,6 +191,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # If --model is supplied alongside a single --providers entry,
+    # override that provider's default model for this run.
+    if args.model and args.providers and len(args.providers) == 1:
+        _DEFAULT_MODELS[args.providers[0]] = args.model
     summary = run_step_2(
         providers=args.providers,
         doc_tokens=args.doc_tokens,

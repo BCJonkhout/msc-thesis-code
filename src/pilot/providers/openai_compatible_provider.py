@@ -115,10 +115,27 @@ class OpenRouterProvider(OpenAICompatibleProvider):
 
     OpenRouter routes requests to underlying providers (Groq, DeepInfra,
     Together, etc.) with automatic fallback. Model IDs are slugs like
-    `qwen/qwen3.6-flash`. Pricing varies by route; a tiered surcharge
-    applies above 256k tokens for Qwen3.6-flash.
+    `deepseek/deepseek-v4-pro` or `moonshotai/kimi-k2.6`. Caching is
+    automatic for OpenAI / DeepSeek / Grok / Groq / Moonshot / Gemini
+    2.5 routes (per OpenRouter docs) but NOT for Qwen routes — that's
+    why we switched the open-weights row from Qwen to DeepSeek/Moonshot.
     """
 
     name = "openrouter"
     base_url = "https://openrouter.ai/api/v1"
     api_key_env_var = "OPENROUTER_API_KEY"
+
+
+class XAIProvider(OpenAICompatibleProvider):
+    """xAI (Grok) via OpenAI-compatible endpoint at api.x.ai.
+
+    Model IDs are bare slugs (no prefix): `grok-4.3`,
+    `grok-4-1-fast-non-reasoning`, `grok-4.20-0309-non-reasoning`, etc.
+    xAI's API closely follows OpenAI's Chat Completions shape; cached
+    token counts are returned under prompt_tokens_details.cached_tokens
+    when caching fires.
+    """
+
+    name = "xai"
+    base_url = "https://api.x.ai/v1"
+    api_key_env_var = "XAI_API_KEY"

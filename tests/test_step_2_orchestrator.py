@@ -65,7 +65,7 @@ def test_no_keys_returns_all_skipped(tmp_path: Path) -> None:
 
     assert summary["providers_tested"] == []
     assert set(summary["providers_skipped"]) == {
-        "anthropic", "openai", "gemini", "dashscope", "openrouter"
+        "anthropic", "openai", "gemini", "dashscope", "openrouter", "xai"
     }
     assert summary["all_passed"] is False
     assert summary["any_passed"] is False

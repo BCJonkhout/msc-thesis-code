@@ -4,7 +4,7 @@
 #
 # See pilot plan § 3.3 and § 5.8 decisions #6, #16.
 
-# ─── Closed answerer slate (4 candidates enter smoke) ─────────────────────────
+# ─── Closed answerer slate (enter smoke) ──────────────────────────────────────
 closed_candidates:
   - id: claude-sonnet-4-6
     provider: anthropic
@@ -27,6 +27,26 @@ closed_candidates:
     cache_tier_source: provider:ai.google.dev/gemini-api/docs/caching
     source: pilot:5.8#6
 
+  - id: gemini-3.1-flash-lite-preview
+    provider: google
+    context_window_tokens: 1048576
+    cache_tier: cached_content_configurable
+    cache_tier_source: provider:ai.google.dev/gemini-api/docs/caching
+    source: pilot:5.8#6
+    notes: >
+      Lite variant of Gemini 3.1 Flash with 1M context. The
+      gemini-3.1-flash-live-preview alternative is rejected because
+      its live-preview surface caps at 131k context, which cannot
+      serve NovelQA's longest non-B48 novel (~772k tokens).
+
+  - id: gemini-flash-latest
+    provider: google
+    context_window_tokens: 1048576
+    cache_tier: cached_content_configurable
+    cache_tier_source: provider:ai.google.dev/gemini-api/docs/caching
+    source: pilot:5.8#6
+    notes: Alias to current best Gemini Flash; auto-advances as Google ships revisions.
+
   - id: gpt-5.4
     provider: openai
     context_window_tokens: 1050000
@@ -34,65 +54,171 @@ closed_candidates:
     cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
     source: pilot:5.8#6
 
-# ─── Open-weights candidates (enter smoke; access constraints documented) ────
+  - id: gpt-5.4-pro
+    provider: openai
+    context_window_tokens: 1050000
+    cache_tier: 24h_extended
+    cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
+    source: pilot:5.8#6
+    notes: Pro tier of GPT-5.4; stronger reasoning at higher cost.
+
+  - id: gpt-5.5
+    provider: openai
+    context_window_tokens: 1050000  # verify
+    context_window_verification_required: true
+    cache_tier: 24h_extended
+    cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
+    source: pilot:5.8#6
+    released: 2026-04-23
+    notes: Newest OpenAI flagship released 2026-04-23.
+
+  - id: gpt-5.5-pro
+    provider: openai
+    context_window_tokens: 1050000  # verify
+    context_window_verification_required: true
+    cache_tier: 24h_extended
+    cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
+    source: pilot:5.8#6
+    released: 2026-04-23
+    notes: Pro tier of GPT-5.5; strongest OpenAI reasoning candidate.
+
+  - id: grok-4.3
+    provider: xai
+    context_window_tokens: 256000  # verify on first call; xAI docs needed
+    context_window_verification_required: true
+    cache_tier: automatic_via_xai
+    cache_tier_source: provider:x.ai/api
+    source: pilot:5.8#6
+    notes: >
+      xAI's flagship reasoning model. Grok is closed-weights; this is
+      a fourth closed-frontier vendor in the cross-model check. Context
+      window per xAI's documentation must be verified — Grok 4.x family
+      has historically capped well below 1M.
+
+  - id: grok-4-1-fast-non-reasoning
+    provider: xai
+    context_window_tokens: 256000
+    context_window_verification_required: true
+    cache_tier: automatic_via_xai
+    cache_tier_source: provider:x.ai/api
+    source: pilot:5.8#6
+    notes: Cheaper Grok variant; fast non-reasoning mode.
+
+  - id: grok-4-fast-reasoning
+    provider: xai
+    context_window_tokens: 256000
+    context_window_verification_required: true
+    cache_tier: automatic_via_xai
+    cache_tier_source: provider:x.ai/api
+    source: pilot:5.8#6
+    notes: Reasoning variant of grok-4-fast; tests reasoning-mode dimension on a fast tier.
+
+  - id: grok-4.20-0309-non-reasoning
+    provider: xai
+    context_window_tokens: 256000
+    context_window_verification_required: true
+    cache_tier: automatic_via_xai
+    cache_tier_source: provider:x.ai/api
+    source: pilot:5.8#6
+    notes: Mid-tier Grok variant from the 4.20 line.
+
+  - id: grok-4.20-0309-reasoning
+    provider: xai
+    context_window_tokens: 256000
+    context_window_verification_required: true
+    cache_tier: automatic_via_xai
+    cache_tier_source: provider:x.ai/api
+    source: pilot:5.8#6
+    notes: Reasoning variant of grok-4.20-0309; pairs with the non-reasoning row to test reasoning-mode delta.
+
+# ─── Open-weights candidates (enter smoke; cache support is the gate) ────────
+# All open-weights routes go through OpenRouter; OpenRouter exposes
+# automatic prompt caching for OpenAI / DeepSeek / Grok / Groq /
+# Moonshot / Gemini 2.5 routes. Qwen routes do NOT expose caching,
+# which is why we replaced Qwen3.6-flash with DeepSeek + Moonshot.
 open_weights_candidates:
-  - id: qwen/qwen3.6-flash
+  - id: deepseek/deepseek-v4-pro
     provider: openrouter
-    context_window_tokens: 1000000
-    cache_supported: true
-    cache_tier_source: provider:openrouter.ai/qwen/qwen3.6-flash
-    license: Apache-2.0  # Qwen3.6 line; flash variant inherits
+    context_window_tokens: 1000000  # verify on first call
+    context_window_verification_required: true
+    cache_supported: true  # DeepSeek route exposes automatic caching via OpenRouter
+    cache_tier_source: provider:openrouter.ai/docs/guides/best-practices/prompt-caching
+    license: open-weights  # DeepSeek-V4 line; verify exact license
     released: 2026
     source: pilot:5.8#6
     notes: >
-      Substitutes for Qwen3.6-27B because the user does not have access
-      to the 27B variant via DashScope. flash is the cost-optimized
-      Qwen3.6 variant served via OpenRouter; pricing is $0.25/M input
-      (tiered above 256k) + $1.50/M output. OpenRouter routes to
-      whichever underlying provider serves the model best.
-    methodological_caveat: >
-      flash is smaller than the closed candidates (Sonnet 4.6 / Opus 4.7
-      / Gemini 3.1 Pro Preview / GPT-5.4). The cross-model stability
-      check (Phase F) therefore compares 'different model family' AND
-      'different scale' simultaneously rather than isolating the family
-      dimension. Document as a Threats-to-Validity note when reporting
-      the cross-model results.
+      Primary open-weights candidate as of 2026-05-02 (replaces
+      qwen/qwen3.6-flash which had no caching exposure on OpenRouter).
+      DeepSeek-V4-Pro is the flagship dense variant; pro tier is more
+      expensive than flash but has better long-context behaviour.
 
-  - id: qwen3.6-27b
-    provider: dashscope
-    context_window_tokens_native: 262144
-    context_window_tokens_yarn_extended: 1010000
-    yarn_extension_required: true
-    yarn_validation_source: pilot:5.8#7
-    cache_tier: 5min_ephemeral_only
-    cache_tier_source: thesis-msc/notes/cache_ttl_per_provider.md
-    license: Apache-2.0
-    released: 2026-04-22
-    source: pilot:5.8#6
-    status: not_accessible
-    notes: >
-      Original choice; user does not have DashScope access. Kept in
-      the candidate table for documentation but not part of the active
-      smoke slate.
-
-  - id: minimax-m2.7
-    provider: minimax  # primary; DeepInfra/Together are alternates
-    context_window_tokens: 1000000  # verify on first call
+  - id: deepseek/deepseek-v4-flash
+    provider: openrouter
+    context_window_tokens: 1000000  # verify
     context_window_verification_required: true
-    cache_tier_source: thesis-msc/notes/cache_ttl_per_provider.md
+    cache_supported: true
+    cache_tier_source: provider:openrouter.ai/docs/guides/best-practices/prompt-caching
+    license: open-weights
+    released: 2026
+    source: pilot:5.8#6
+    notes: Cheaper DeepSeek-V4 variant; fallback if Pro is over budget.
+
+  - id: moonshotai/kimi-k2.6
+    provider: openrouter
+    context_window_tokens: 262142  # 256K native (~2^18); verified via OpenRouter API 2026-04
+    cache_supported: true  # Moonshot route exposes automatic caching
+    cache_tier_source: provider:openrouter.ai/docs/guides/best-practices/prompt-caching
     license: open-weights
     released: 2026-04
     source: pilot:5.8#6
     notes: >
-      Caching support per provider must be verified before locking;
-      DeepInfra and Together are open-weights API alternates if
-      MiniMax first-party API doesn't support caching.
+      Caveat: Kimi K2.6 native context is 262,142 tokens (~256k), well
+      below the 780k NovelQA threshold. This candidate cannot serve
+      full NovelQA novels and is restricted to QASPER + truncated
+      NovelQA in the cross-model check. Useful as a third open-weights
+      row on the smaller subset.
 
-# ─── Rejected candidates (documented for the audit trail) ────────────────────
+# ─── Rejected / superseded candidates (documented for the audit trail) ───────
 rejected_candidates:
+  - id: qwen/qwen3.6-flash
+    provider: openrouter
+    context_window_tokens: 1000000
+    license: Apache-2.0
+    released: 2026
+    rejection_reason: no_caching_via_openrouter
+    rejection_source: provider:openrouter.ai/docs/guides/best-practices/prompt-caching
+    rejection_detail: >
+      OpenRouter's prompt-caching docs list caching support for OpenAI,
+      DeepSeek, Grok, Groq, Moonshot, and Gemini 2.5 routes only.
+      Qwen routes do not expose cached_input_tokens. KV-cache
+      verification at 12k and 100k both confirmed cached_tokens=0 with
+      no measurable latency improvement on the second call. The
+      open-weights row would have to pay uncached costs throughout,
+      which is recoverable but undesirable. Replaced by DeepSeek + Moonshot
+      (both on the caching-supported list).
+
+  - id: qwen3.6-27b
+    provider: dashscope
+    context_window_tokens_native: 262144
+    license: Apache-2.0
+    released: 2026-04-22
+    rejection_reason: not_accessible
+    rejection_detail: DashScope access not available in this experimental setup.
+
+  - id: minimax-m2.7
+    provider: minimax
+    context_window_tokens: 1000000
+    license: open-weights
+    released: 2026-04
+    rejection_reason: caching_unverified
+    rejection_detail: >
+      MiniMax first-party API caching support not in OpenRouter's
+      caching-supported list. Could be added via a direct MiniMax
+      adapter if a future revision needs it.
+
   - id: gemma-4-26b-a4b-it
     provider: groq
-    context_window_tokens: 256000  # estimated; Gemma 4 line caps at 256k
+    context_window_tokens: 256000
     license: open-weights
     released: 2026-04-02
     rejection_reason: context_below_threshold
@@ -110,10 +236,7 @@ rejected_candidates:
     rejection_reason: context_below_threshold
     rejection_source: pilot:5.8#5
     rejection_detail: >
-      Same reason as gemma-4-26b-a4b-it. Despite being free-tier on Groq
-      with strong reasoning quality, the 256k ceiling cannot
-      accommodate the long NovelQA novels that motivate the
-      long-context evaluation.
+      Same reason as gemma-4-26b-a4b-it.
 
 # ─── Final answerer choices (TBD; locked by pilot Step 7) ─────────────────────
 final_answerer:

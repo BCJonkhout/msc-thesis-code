@@ -44,15 +44,18 @@ _PROVIDER_DEFAULT_MODEL = {
     "openai": "gpt-5.4",
     "gemini": "gemini-3.1-pro-preview",
     "dashscope": "qwen3.6-27b",
-    "openrouter": "qwen/qwen3.6-flash",
+    "openrouter": "deepseek/deepseek-v4-pro",
+    "xai": "grok-4.3",
 }
 
 _PROVIDER_ENV_VAR = {
     "anthropic": "ANTHROPIC_API_KEY",
+    "opus": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "gemini": "GEMINI_API_KEY",   # GeminiProvider also accepts GOOGLE_API_KEY
     "dashscope": "DASHSCOPE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "xai": "XAI_API_KEY",
 }
 
 

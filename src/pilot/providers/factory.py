@@ -26,7 +26,10 @@ def get_provider(name: str, **kwargs) -> AnswererProvider:
     if name_lc == "openrouter":
         from pilot.providers.openai_compatible_provider import OpenRouterProvider
         return OpenRouterProvider(**kwargs)
+    if name_lc in {"xai", "grok"}:
+        from pilot.providers.openai_compatible_provider import XAIProvider
+        return XAIProvider(**kwargs)
     raise UnknownProviderError(
         f"unknown provider {name!r}; expected one of "
-        f"anthropic, openai, gemini, dashscope, openrouter"
+        f"anthropic, openai, gemini, dashscope, openrouter, xai"
     )
