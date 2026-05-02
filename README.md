@@ -10,13 +10,17 @@ repeated-context workloads under standardized cost accounting:
 
 Datasets: **QASPER**, **Core NovelQA** (excluding B48), **QuALITY**.
 
-The thesis paper lives in `../thesis-msc/`. The pilot setup plan that
-drives this code is `../thesis-msc/notes/pilot_setup_plan.md`.
-**Always read the pilot plan first** — it documents every locked
-decision (sampling temperature `T = 0`, lit-anchored hyperparameters,
-cost-attribution rule, etc.) and the rule that produced each one.
-Empirical findings from each pilot step are in
-`../thesis-msc/notes/pilot_findings.md`.
+The thesis paper itself lives in a sibling repository:
+[`BCJonkhout/thesis-msc-paper`](https://github.com/BCJonkhout/thesis-msc-paper).
+That repository carries the LaTeX source plus the methodology notes
+that drive this code:
+
+- `notes/pilot_setup_plan.md` — every locked pilot decision
+  (sampling temperature `T = 0`, lit-anchored hyperparameters,
+  cost-attribution rule, etc.) and the rule that produced each.
+  **Read this before changing anything in this code repo.**
+- `notes/pilot_findings.md` — empirical findings per pilot step.
+- `notes/cache_ttl_per_provider.md` — provider cache-TTL audit.
 
 ---
 
@@ -29,10 +33,12 @@ and slate. To reproduce results from a clean clone:
 # 1. Prerequisites
 #    - Python 3.11+ (3.12 verified on Windows)
 #    - uv (https://docs.astral.sh/uv/) for dependency resolution
-#    - tectonic OR a working LaTeX install (only needed for thesis builds)
+#    - Ollama (https://ollama.com) for local embedding inference
+#      (needed by the encoder Recall@k sub-experiment in Step 3)
 
 # 2. Sync dependencies (creates .venv/, generates uv.lock)
-cd code
+git clone https://github.com/BCJonkhout/msc-thesis-code.git
+cd msc-thesis-code
 uv sync --extra test
 
 # 3. Provide credentials
@@ -44,16 +50,20 @@ cp .env.example .env
 # reinstateability but the active slate has both providers
 # rejected (see Active slate below).
 
-# 4. Sanity tests (fast, no API calls)
-.venv/Scripts/python.exe -m pytest tests/ -q
+# 4. Pull the embedding model into Ollama
+ollama pull bge-m3
 
-# 5. Run the pipeline
-make pilot-step-0          # plumbing smoke; one toy-doc API call
-make pilot-step-1          # model qualification smoke (~$22)
-make pilot-step-2          # KV-cache verification per provider
-make pilot-data-download   # QASPER + QuALITY + NovelQA → data/
-make pilot-build-calibration # 20 + 20 calibration pool, seed=42
-# Steps 3 dry run + 4 variance + 5 hyperparameters: in progress
+# 5. Sanity tests (fast, no API calls)
+make test
+
+# 6. Run the pipeline
+make step-0              # plumbing smoke; one toy-doc API call
+make step-1              # model qualification smoke (~$22)
+make step-2              # KV-cache verification per provider
+make data-download       # QASPER + QuALITY + NovelQA → data/
+make build-calibration   # 20 + 20 calibration pool, seed=42
+make step-3-encoder      # encoder Recall@k against QASPER gold evidence
+# Step 3 dry run + Step 4 variance + Step 5 hyperparameters: in progress
 ```
 
 Outputs land under `outputs/` (gitignored) and `data/` (gitignored).
@@ -151,12 +161,13 @@ would not need re-verification.
 
 | Step | Make target | What it does | Live API spend (approx) |
 | --- | --- | --- | --- |
-| 0 | `make pilot-step-0` | One toy-doc call through one provider; smokes ledger + prompt + provider plumbing | <$0.01 |
-| 1 | `make pilot-step-1` | 5k/150k/600k smoke across the slate; resume-aware (already-passed `(candidate, tier)` pairs are reused) | $22 across three runs |
-| 2 | `make pilot-step-2` | Per-provider KV-cache verification on a 12k-token doc | <$1 |
-| 3 | `make pilot-data-download` | Acquire QASPER + QuALITY + NovelQA into `data/` | $0 |
-| 3 | `make pilot-build-calibration` | Deterministic 20+20 calibration pool, seed=42 | $0 |
-| 3 | _pending_ | Encoder Recall@20 + summary-model paired build + 40-query dry run | TBD |
+| 0 | `make step-0` | One toy-doc call through one provider; smokes ledger + prompt + provider plumbing | <$0.01 |
+| 1 | `make step-1` | 5k/150k/600k smoke across the slate; resume-aware (already-passed `(candidate, tier)` pairs are reused) | $22 across three runs |
+| 2 | `make step-2` | Per-provider KV-cache verification on a 12k-token doc | <$1 |
+| 3 | `make data-download` | Acquire QASPER + QuALITY + NovelQA into `data/` | $0 |
+| 3 | `make build-calibration` | Deterministic 20+20 calibration pool, seed=42 | $0 |
+| 3 | `make step-3-encoder` | Encoder Recall@k against QASPER gold evidence; locks BGE-M3 if Recall@20 ≥ 0.85 | $0 (local Ollama) |
+| 3 | _pending_ | Summary-model paired build + 40-query end-to-end dry run | TBD |
 | 4–7 | _pending_ | Variance, hyperparameters, cost-ledger sanity, lock-and-ship | TBD |
 
 The pilot step CLIs are also installed as console scripts under the
@@ -331,7 +342,10 @@ corresponding `make pilot-step-N` against the same configs and slate.
 
 ## Related documents
 
-- `../thesis-msc/notes/pilot_setup_plan.md` — full pilot procedure (Steps 0–7).
-- `../thesis-msc/notes/pilot_findings.md` — empirical findings per step.
-- `../thesis-msc/notes/cache_ttl_per_provider.md` — provider cache TTL audit.
-- `../thesis-msc/project.tex` — the thesis paper itself.
+All in the companion paper repo
+[`BCJonkhout/thesis-msc-paper`](https://github.com/BCJonkhout/thesis-msc-paper):
+
+- `notes/pilot_setup_plan.md` — full pilot procedure (Steps 0–7).
+- `notes/pilot_findings.md` — empirical findings per pilot step.
+- `notes/cache_ttl_per_provider.md` — provider cache TTL audit.
+- `project.tex` — the thesis paper itself.
