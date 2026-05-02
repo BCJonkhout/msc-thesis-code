@@ -60,6 +60,12 @@ class OpenAICompatibleProvider(AnswererProvider):
         # provider-side 401 if the key is missing or invalid.
         self._client = OpenAI(api_key=resolved_key, base_url=self.base_url)
 
+    # Subclasses can override these to inject provider-specific routing
+    # controls. extra_body lands in the JSON body; extra_headers lands as
+    # HTTP headers.
+    extra_body: dict = {}
+    extra_headers: dict = {}
+
     def call(
         self,
         prompt: str,
@@ -70,13 +76,11 @@ class OpenAICompatibleProvider(AnswererProvider):
         top_p: float = 1.0,
         cache_control: CacheControl = CacheControl.DISABLED,
     ) -> ProviderResult:
-        # OpenAI-compatible endpoints do not universally support
-        # prompt_cache_retention. Pass it only if explicitly requested
-        # (EXTENDED_24H) and let the host accept-or-ignore. Most hosts
-        # will simply ignore unknown kwargs, but some strict gateways
-        # reject them; we restrict the kwarg to OpenAI's own host
-        # (openai_provider.py).
         extra_kwargs: dict = {}
+        if self.extra_body:
+            extra_kwargs["extra_body"] = dict(self.extra_body)
+        if self.extra_headers:
+            extra_kwargs["extra_headers"] = dict(self.extra_headers)
 
         start = time.perf_counter()
         response = self._client.chat.completions.create(
@@ -115,15 +119,68 @@ class OpenRouterProvider(OpenAICompatibleProvider):
 
     OpenRouter routes requests to underlying providers (Groq, DeepInfra,
     Together, etc.) with automatic fallback. Model IDs are slugs like
-    `deepseek/deepseek-v4-pro` or `moonshotai/kimi-k2.6`. Caching is
-    automatic for OpenAI / DeepSeek / Grok / Groq / Moonshot / Gemini
-    2.5 routes (per OpenRouter docs) but NOT for Qwen routes — that's
-    why we switched the open-weights row from Qwen to DeepSeek/Moonshot.
+    `deepseek/deepseek-v4-pro` or `moonshotai/kimi-k2.6`.
+
+    Per OpenRouter's prompt-caching best-practices doc, sticky routing
+    only activates after a request is observed to use caching. To make
+    caching deterministic for the multi-query repeated-context workload
+    this pilot measures, the adapter pins a single upstream when a
+    cache-supporting upstream exists for the slug. Empirical state
+    from `/api/v1/models/<slug>/endpoints` (queried 2026-05-02):
+
+      deepseek/deepseek-v4-pro    : only "deepseek" upstream caches
+      deepseek/deepseek-v4-flash  : only "deepseek" upstream caches
+      moonshotai/kimi-k2.6        : no upstream supports caching
+
+    Slugs without a caching upstream are routed without a pin (caching
+    will not fire there regardless; pinning would only reduce
+    availability).
     """
 
     name = "openrouter"
     base_url = "https://openrouter.ai/api/v1"
     api_key_env_var = "OPENROUTER_API_KEY"
+
+    # Map of model-slug-prefix → upstream tag that supports caching.
+    # Slugs not listed here go through with no pin.
+    _CACHE_PINNED_UPSTREAMS = {
+        "deepseek/": "deepseek",
+    }
+
+    def call(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        max_tokens: int | None = None,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        cache_control: CacheControl = CacheControl.DISABLED,
+    ) -> ProviderResult:
+        pinned_upstream = None
+        for prefix, upstream in self._CACHE_PINNED_UPSTREAMS.items():
+            if model.startswith(prefix):
+                pinned_upstream = upstream
+                break
+
+        if pinned_upstream:
+            self.extra_body = {
+                "provider": {
+                    "only": [pinned_upstream],
+                    "allow_fallbacks": False,
+                },
+            }
+        else:
+            self.extra_body = {}
+
+        return super().call(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            cache_control=cache_control,
+        )
 
 
 class XAIProvider(OpenAICompatibleProvider):
@@ -131,11 +188,24 @@ class XAIProvider(OpenAICompatibleProvider):
 
     Model IDs are bare slugs (no prefix): `grok-4.3`,
     `grok-4-1-fast-non-reasoning`, `grok-4.20-0309-non-reasoning`, etc.
-    xAI's API closely follows OpenAI's Chat Completions shape; cached
-    token counts are returned under prompt_tokens_details.cached_tokens
-    when caching fires.
+
+    xAI's prompt-caching best-practices doc requires the
+    `x-grok-conv-id` header for reliable cache hits: cache is
+    per-server, requests are load-balanced, and without a stable
+    conversation id the second call can land on a different server
+    that has never seen the prefix. A stable adapter-instance UUID is
+    sent on every call so consecutive calls from the same instance
+    target the same server.
     """
 
     name = "xai"
     base_url = "https://api.x.ai/v1"
     api_key_env_var = "XAI_API_KEY"
+
+    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
+        import uuid
+
+        super().__init__(api_key=api_key, base_url=base_url)
+        # Per-instance stable id; consecutive calls share it so xAI's
+        # load-balancer routes them to the same cache-warm server.
+        self.extra_headers = {"x-grok-conv-id": str(uuid.uuid4())}
