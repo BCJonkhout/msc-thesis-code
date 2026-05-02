@@ -55,11 +55,17 @@ class AnthropicProvider(AnswererProvider):
         # DISABLED: leave the block bare; no cache hit will register.
 
         # Anthropic rejects sending both temperature and top_p on newer
-        # Claude models (Sonnet 4.6+, Opus 4.7+). With T=0 (greedy) top_p
-        # is irrelevant, so we send only temperature in that case. For
-        # T>0 we send only top_p when it differs from the default 1.0.
+        # Claude models (Sonnet 4.6+, Opus 4.7+). Opus 4.7 additionally
+        # deprecates the temperature parameter entirely — sending
+        # temperature=0 returns 400 "`temperature` is deprecated for
+        # this model." For greedy decoding on Opus, omit both sampling
+        # parameters (the model defaults are used).
         sampling_kwargs: dict = {}
-        if temperature == 0.0:
+        opus_4_7 = model.startswith("claude-opus-4-7")
+        if opus_4_7:
+            # No temperature, no top_p: rely on the model's defaults.
+            pass
+        elif temperature == 0.0:
             sampling_kwargs["temperature"] = 0.0
         elif top_p != 1.0:
             sampling_kwargs["top_p"] = top_p

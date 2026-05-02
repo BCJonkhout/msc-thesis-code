@@ -143,6 +143,49 @@ class CandidateVerdict:
     total_usd_estimate: float | None = None
 
 
+# ─── Resume / idempotency support ─────────────────────────────────────────────
+def _load_prior_passes(out_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
+    """Walk outputs/sanity/step_1_smoke_*.json and return prior pass entries.
+
+    Returns:
+        {model_id: {tier: serialised_tier_result_dict}} for any tier that
+        previously achieved status="pass". Most-recent verdict wins on
+        conflicts. Tiers that previously failed are NOT included — they
+        will be re-run.
+    """
+    if not out_dir.exists():
+        return {}
+    prior: dict[str, dict[str, dict[str, Any]]] = {}
+    for path in sorted(out_dir.glob("step_1_smoke_*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for v in data.get("verdicts", []):
+            model_id = v.get("model")
+            if not model_id:
+                continue
+            for tier_dict in v.get("tier_results", []):
+                if tier_dict.get("status") == "pass":
+                    prior.setdefault(model_id, {})[tier_dict["tier"]] = tier_dict
+    return prior
+
+
+def _tier_result_from_dict(d: dict[str, Any]) -> TierResult:
+    """Reconstruct a TierResult from a serialised dict, marking it as reused."""
+    return TierResult(
+        tier=d["tier"],
+        tier_tokens=d.get("tier_tokens", 0),
+        status="pass_reused",
+        wallclock_s=d.get("wallclock_s", 0.0),
+        uncached_input_tokens=d.get("uncached_input_tokens", 0),
+        cached_input_tokens=d.get("cached_input_tokens", 0),
+        output_tokens=d.get("output_tokens", 0),
+        response_first_120=d.get("response_first_120", ""),
+        failure_reason=None,
+    )
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def _env_var_names(provider: str) -> tuple[str, ...]:
     raw = _ENV_VAR.get(provider, "")
@@ -281,7 +324,13 @@ def _run_one_tier(
 
 
 def _aggregate_candidate_status(tier_results: list[TierResult]) -> tuple[str, str | None]:
-    """Apply the §5.8 row #6 decision rule to per-tier results."""
+    """Apply the §5.8 row #6 decision rule to per-tier results.
+
+    `pass_reused` is treated as `pass` (a prior live run already
+    cleared the gate for that tier).
+    """
+    pass_statuses = {"pass", "pass_reused"}
+
     # Rule 1: 600k latency timeout = eliminate.
     for r in tier_results:
         if r.tier == "600k" and r.status == "fail_latency":
@@ -297,7 +346,7 @@ def _aggregate_candidate_status(tier_results: list[TierResult]) -> tuple[str, st
     error_tiers = [r.tier for r in tier_results if r.status == "error"]
     if error_tiers:
         return "fail", f"errors_on_tiers:{','.join(error_tiers)}"
-    # Otherwise pass — even if some tiers were context_too_small.
+    # Otherwise pass — even if some tiers were context_too_small or reused.
     return "pass", None
 
 
@@ -309,6 +358,7 @@ def run_step_1(
     only_candidates: list[str] | None = None,
     out_dir: Path = Path("outputs/sanity"),
     ledger_root: Path | None = None,
+    resume: bool = True,
 ) -> dict[str, Any]:
     candidates = _load_candidates(models_yaml)
     if only_candidates:
@@ -318,6 +368,8 @@ def run_step_1(
     run_id = new_run_id()
     ledger = CostLedger(run_id=run_id, root=ledger_root if ledger_root is not None
                         else Path("outputs/runs"))
+
+    prior_passes = _load_prior_passes(out_dir) if resume else {}
 
     verdicts: list[CandidateVerdict] = []
     for c in candidates:
@@ -337,6 +389,10 @@ def run_step_1(
 
         tier_results: list[TierResult] = []
         for tier in selected_tiers:
+            prior = prior_passes.get(model_id, {}).get(tier)
+            if prior is not None:
+                tier_results.append(_tier_result_from_dict(prior))
+                continue
             tier_results.append(_run_one_tier(c, tier, ledger=ledger))
 
         status, reason = _aggregate_candidate_status(tier_results)
@@ -397,6 +453,10 @@ def main() -> int:
         "--out", type=Path, default=Path("outputs/sanity"),
         help="Directory for the verdict JSON.",
     )
+    parser.add_argument(
+        "--no-resume", action="store_true",
+        help="Disable resume: re-run every (candidate, tier) even if a prior verdict exists.",
+    )
     args = parser.parse_args()
 
     summary = run_step_1(
@@ -404,6 +464,7 @@ def main() -> int:
         tiers=args.tiers,
         only_candidates=args.only,
         out_dir=args.out,
+        resume=not args.no_resume,
     )
 
     # Print a tight summary; full verdict is on disk.

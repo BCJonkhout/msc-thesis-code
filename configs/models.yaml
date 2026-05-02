@@ -54,34 +54,6 @@ closed_candidates:
     cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
     source: pilot:5.8#6
 
-  - id: gpt-5.4-pro
-    provider: openai
-    context_window_tokens: 1050000
-    cache_tier: 24h_extended
-    cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
-    source: pilot:5.8#6
-    notes: Pro tier of GPT-5.4; stronger reasoning at higher cost.
-
-  - id: gpt-5.5
-    provider: openai
-    context_window_tokens: 1050000  # verify
-    context_window_verification_required: true
-    cache_tier: 24h_extended
-    cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
-    source: pilot:5.8#6
-    released: 2026-04-23
-    notes: Newest OpenAI flagship released 2026-04-23.
-
-  - id: gpt-5.5-pro
-    provider: openai
-    context_window_tokens: 1050000  # verify
-    context_window_verification_required: true
-    cache_tier: 24h_extended
-    cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
-    source: pilot:5.8#6
-    released: 2026-04-23
-    notes: Pro tier of GPT-5.5; strongest OpenAI reasoning candidate.
-
   - id: grok-4.3
     provider: xai
     context_window_tokens: 256000  # verify on first call; xAI docs needed
@@ -237,6 +209,50 @@ rejected_candidates:
     rejection_source: pilot:5.8#5
     rejection_detail: >
       Same reason as gemma-4-26b-a4b-it.
+
+  - id: gpt-5.5
+    provider: openai
+    context_window_tokens: 1050000
+    license: closed
+    released: 2026-04-23
+    rejection_reason: temperature_zero_unsupported
+    rejection_source: empirical:step_1_smoke_2026-05-02
+    rejection_detail: >
+      Empirical Step 1 smoke (2026-05-02) returned 400 BadRequest:
+      "Unsupported value: 'temperature' does not support 0 with this
+      model. Only the default (1) value is supported." The pilot's
+      sampling temperature is fixed at T=0 across all architectures
+      per pilot plan § 3.4.3 (consensus answerer setting in QA
+      literature, plus the falsifiability requirement to hold
+      sampling-temperature constant across architectures). GPT-5.5
+      cannot satisfy this constraint and is therefore eliminated.
+
+  - id: gpt-5.4-pro
+    provider: openai
+    context_window_tokens: 1050000
+    license: closed
+    rejection_reason: chat_completions_api_unsupported
+    rejection_source: empirical:step_1_smoke_2026-05-02
+    rejection_detail: >
+      Empirical Step 1 smoke (2026-05-02) returned 404:
+      "This is not a chat model and thus not supported in the
+      v1/chat/completions endpoint. Did you mean to use v1/completions?"
+      Pro variant is exposed only through OpenAI's Responses API,
+      which is a different I/O surface than the Chat Completions API
+      our adapter targets. A separate Responses-API code path would
+      be needed; the engineering cost is not justified for a pro
+      variant that is ~6x more expensive than gpt-5.4 base, which
+      already passes the smoke.
+
+  - id: gpt-5.5-pro
+    provider: openai
+    context_window_tokens: 1050000
+    license: closed
+    released: 2026-04-23
+    rejection_reason: chat_completions_api_unsupported
+    rejection_source: empirical:step_1_smoke_2026-05-02
+    rejection_detail: >
+      Same as gpt-5.4-pro: Responses-API only.
 
 # ─── Final answerer choices (TBD; locked by pilot Step 7) ─────────────────────
 final_answerer:
