@@ -1,0 +1,42 @@
+[project]
+name = "pilot"
+version = "0.1.0"
+description = "Step 0 plumbing scaffold for the long-context QA benchmark pilot. Cost ledger, prompt template harness, KV-cache verification, MC answer post-processor, provider abstraction layer."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Beau Jonkhout" }]
+
+dependencies = [
+    "anthropic>=0.97.0",
+    "openai>=2.33.0",
+    "google-genai>=1.74.0",
+    "dashscope>=1.25.17",
+    "pydantic>=2.13.3",
+    "pyyaml>=6.0.3",
+    "httpx>=0.28.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+]
+
+[project.scripts]
+pilot-step-0 = "pilot.cli.step_0_smoke:main"
+pilot-kvcache = "pilot.sanity.kvcache_check:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pilot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra --strict-markers"

@@ -1,0 +1,139 @@
+# Price card: provider rates, sampling settings, storage horizon, cache TTLs.
+# Every value carries a `source:` tag per pilot plan § 9 reproducibility rule.
+# `pilot:5.8#N`  = pilot decision-matrix row reference
+# `pilot:6`      = pilot plan § 6 decisions table
+# `lit:KEY`      = literature citation key
+# `rule:NAME`    = methodology rule
+# `provider:URL` = provider-doc snapshot
+
+# ─── Sampling settings (locked workspace-wide) ────────────────────────────────
+sampling:
+  temperature:
+    value: 0
+    source: pilot:5.8#sampling-temperature
+  top_p:
+    value: 1.0
+    source: rule:greedy-decoding-default
+
+# ─── Cost-attribution rule (locked) ───────────────────────────────────────────
+cost_attribution:
+  rule: run_index_0_only
+  source: rule:option-A
+  description: >
+    Cost is computed from run_index == 0 only.
+    Runs 2..N contribute to variance reporting but not to deployment cost.
+    Avoids artificial cache amplification within the variance protocol.
+
+# ─── Storage rate (locked) ────────────────────────────────────────────────────
+storage:
+  rate_usd_per_gib_month:
+    value: 0.023
+    source: rule:s3-standard-2026-04
+    description: AWS S3 Standard list price as of 2026-04
+  study_horizon_days:
+    value: 90
+    source: pilot:6
+
+# ─── Local-equivalent GPU rate (locked) ───────────────────────────────────────
+gpu:
+  h100_usd_per_hour:
+    value: 2.00
+    source: rule:lambda-public-list-2026-04
+    description: Lambda Cloud public list price for H100 PCIe as of 2026-04
+  h100_usd_per_second: 0.000556
+
+# ─── Provider rate cards (verified 2026-04-29; verify on every run) ───────────
+# All rates in USD per 1M tokens unless noted.
+providers:
+  anthropic:
+    snapshot_date: 2026-04-29
+    source: provider:platform.claude.com/docs/en/build-with-claude/prompt-caching
+    cache_ttl_minutes:
+      ephemeral_default: 5
+      extended_tier: 60
+    cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    models:
+      claude-sonnet-4-6-20260217:
+        input_uncached: 3.00
+        input_cached_read: 0.30
+        cache_write_5m: 3.75
+        cache_write_1h: 6.00
+        output: 15.00
+      claude-opus-4-7-20260416:
+        input_uncached: 5.00
+        input_cached_read: 0.50
+        cache_write_5m: 6.25
+        cache_write_1h: 10.00
+        output: 25.00
+
+  openai:
+    snapshot_date: 2026-04-29
+    source: provider:developers.openai.com/api/docs/guides/prompt-caching
+    cache_ttl_minutes:
+      automatic_default: 60   # short-window observed; verify per-account
+      extended_24h_tier: 1440 # GPT-5.1+ via prompt_cache_retention=24h
+    cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    models:
+      gpt-5.4:
+        input_uncached_below_272k: 2.50
+        input_uncached_above_272k: 5.00
+        input_cached_read: 0.25  # automatic prefix caching ~10% of base
+        output_below_272k: 15.00
+        output_above_272k: 22.50
+
+  google:
+    snapshot_date: 2026-04-29
+    source: provider:ai.google.dev/gemini-api/docs/caching
+    cache_ttl_minutes:
+      cached_content_default: 60
+      cached_content_max: 1440  # configurable per CachedContent.ttl
+    cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    models:
+      gemini-3.1-pro-preview:
+        input_uncached_below_200k: 2.00
+        input_uncached_above_200k: 4.00
+        input_cached_read: 0.50
+        output_below_200k: 12.00
+        output_above_200k: 18.00
+
+  dashscope:
+    snapshot_date: 2026-04-29
+    source: provider:alibabacloud.com/help/en/model-studio/context-cache
+    cache_ttl_minutes:
+      ephemeral_only: 5  # NO extended tier; binding constraint per audit
+    cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    models:
+      qwen3.6-27b:
+        input_uncached: 0.80    # verify on first call; placeholder
+        input_cached_read: 0.20 # verify on first call; placeholder
+        output: 1.20            # verify on first call; placeholder
+        verification_required: true
+
+# ─── Embedding rate cards (closed APIs only; open-weights = local GPU) ────────
+embedding_providers:
+  openai:
+    text-embedding-3-large:
+      input: 0.13
+      source: provider:platform.openai.com/docs/models/text-embedding-3-large
+  google:
+    gemini-embedding-001:
+      input: 0.15
+      source: provider:developers.googleblog.com/gemini-embedding-available-gemini-api/
+  voyage:
+    voyage-3-large:
+      input: 0.18
+      source: provider:docs.voyageai.com/docs/pricing
+  cohere:
+    embed-v4:
+      input: 0.12
+      source: provider:docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-embed-v4.html
+
+# ─── Cross-model stability check (Phase F) cache pinning ──────────────────────
+cross_model_check:
+  cache_ttl_pin_minutes: 5
+  source: pilot:5.8#16
+  rationale: >
+    DashScope's 5-min cap is the binding constraint. Pinning all providers
+    to 5-min ephemeral makes the comparison apples-to-apples on
+    serving-stack cache headroom rather than confounding architecture
+    differences with cache-tier choices.

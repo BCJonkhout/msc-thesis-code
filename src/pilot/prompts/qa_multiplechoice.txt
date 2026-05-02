@@ -1,0 +1,12 @@
+Answer the question using ONLY the provided context.
+If the context does not contain the answer, respond exactly with `I do not know`.
+
+Context:
+{context}
+
+Question: {query}
+
+Options:
+{options}
+
+Respond with only the letter of the correct option.

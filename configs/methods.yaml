@@ -1,0 +1,96 @@
+# Per-method hyperparameters, lit-anchored from the original method papers.
+# NOT empirically calibrated on this thesis's pool — the benchmark tests
+# methods AS PUBLISHED. Optional ±1-step ablation around each value is
+# allowed as confirmation, not tuning. See pilot plan § 5 Step 5.
+#
+# Every value carries a `source:` tag.
+
+flat_full_context:
+  # No preprocessing. Relies on the serving stack's prefix caching.
+  cache_aware: true
+  source: lit:kwon2023pagedattention
+  notes: >
+    Cache configuration is provider-specific and lives in price_card.yaml
+    cache_ttl_minutes_per_provider; main study uses each provider's
+    native extended caching for the chosen primary, cross-model check
+    pins all providers to 5-min ephemeral.
+
+naive_rag:
+  chunk_size_tokens:
+    value: 384
+    source: lit:lewis2020retrieval
+    rationale: >
+      Standard RAG-defaults range (256–512); centre value chosen for a
+      balanced quality/cost point.
+  top_k:
+    value: 8
+    source: lit:lewis2020retrieval
+    rationale: Standard RAG-defaults range (4–16); centre value.
+  overlap:
+    value: 0
+    source: lit:sarthi2024raptor
+    rationale: >
+      No-overlap chunking matches RAPTOR's reference implementation
+      for fair encoder comparison.
+  chunker: sentence_boundary_aware
+  chunker_source: lit:robertson2009probabilistic
+
+raptor:
+  retrieval_k:
+    value: 12
+    source: lit:sarthi2024raptor
+    rationale: Sarthi et al. 2024 § 5 stable operating point for collapsed-tree.
+  tree_depth_cap:
+    value: 4
+    source: lit:sarthi2024raptor
+  summary_max_tokens:
+    value: 200
+    source: lit:sarthi2024raptor
+    rationale: RAPTOR official repo SummarizationModels.py default.
+  retrieval_strategy:
+    value: collapsed_tree
+    source: lit:sarthi2024raptor
+    rationale: >
+      Reported in the original paper as the stronger default vs
+      tree-traversal across their experimental settings.
+  clustering_seed:
+    value: 42
+    source: rule:seed-42-everywhere
+
+graphrag:
+  community_selection_depth:
+    value: 2
+    source: lit:edge2024local
+    rationale: >
+      Microsoft GraphRAG paper default for the local-search variant.
+  entity_extraction_prompt:
+    value: microsoft_graphrag_default
+    source: lit:edge2024local
+  community_detection:
+    algorithm: leiden
+    seed:
+      value: 42
+      source: rule:seed-42-everywhere
+  per_document_cost_guard_usd:
+    value: 5.00
+    source: pilot:5.8#11
+    rationale: >
+      Per-document budget guard: refuse to run entity extraction if
+      estimated cost exceeds this. Decision matrix #11 escalates to
+      open-weights entity extraction if average exceeds $20/novel.
+
+# ─── Optional ablation grid (confirmation, not tuning) ────────────────────────
+optional_ablation:
+  enabled: false  # set true if running the optional ±1-step ablation
+  source: pilot:5.8#14-16
+  cells:
+    naive_rag:
+      top_k_alternates: [4, 16]
+    raptor:
+      retrieval_k_alternates: [8]
+    graphrag:
+      community_selection_depth_alternates: [1]
+  acceptance_rule: >
+    If any ablation cell beats the lit-anchored value by > 0.05 absolute
+    on calibration quality, escalate to supervisor decision rather than
+    silently switching.

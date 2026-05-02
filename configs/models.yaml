@@ -1,0 +1,131 @@
+# Model slate for the pilot. Final primary answerer is determined by
+# Phase F cross-model stability check (decision #16); slate of candidates
+# that enter the smoke phase is locked here.
+#
+# See pilot plan § 3.3 and § 5.8 decisions #6, #16.
+
+# ─── Closed answerer slate (4 candidates enter smoke) ─────────────────────────
+closed_candidates:
+  - id: claude-sonnet-4-6-20260217
+    provider: anthropic
+    context_window_tokens: 1000000
+    cache_tier: 1h_extended
+    cache_tier_source: provider:platform.claude.com/docs/en/build-with-claude/prompt-caching
+    source: pilot:5.8#6
+
+  - id: claude-opus-4-7-20260416
+    provider: anthropic
+    context_window_tokens: 1000000
+    cache_tier: 1h_extended
+    cache_tier_source: provider:platform.claude.com/docs/en/build-with-claude/prompt-caching
+    source: pilot:5.8#6
+
+  - id: gemini-3.1-pro-preview
+    provider: google
+    context_window_tokens: 1000000
+    cache_tier: cached_content_configurable
+    cache_tier_source: provider:ai.google.dev/gemini-api/docs/caching
+    source: pilot:5.8#6
+
+  - id: gpt-5.4
+    provider: openai
+    context_window_tokens: 1050000
+    cache_tier: 24h_extended  # GPT-5.1+ via prompt_cache_retention=24h
+    cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
+    source: pilot:5.8#6
+
+# ─── Open-weights candidates (2 enter smoke) ──────────────────────────────────
+open_weights_candidates:
+  - id: qwen3.6-27b
+    provider: dashscope
+    context_window_tokens_native: 262144
+    context_window_tokens_yarn_extended: 1010000
+    yarn_extension_required: true
+    yarn_validation_source: pilot:5.8#7
+    cache_tier: 5min_ephemeral_only
+    cache_tier_source: thesis-msc/notes/cache_ttl_per_provider.md
+    license: Apache-2.0
+    released: 2026-04-22
+    source: pilot:5.8#6
+
+  - id: minimax-m2.7
+    provider: minimax  # primary; DeepInfra/Together are alternates
+    context_window_tokens: 1000000  # verify on first call
+    context_window_verification_required: true
+    cache_tier_source: thesis-msc/notes/cache_ttl_per_provider.md
+    license: open-weights
+    released: 2026-04
+    source: pilot:5.8#6
+    notes: >
+      Caching support per provider must be verified before locking;
+      DeepInfra and Together are open-weights API alternates if
+      MiniMax first-party API doesn't support caching.
+
+# ─── Final answerer choices (TBD; locked by pilot Step 7) ─────────────────────
+final_answerer:
+  primary: TBD
+  primary_source: pilot:5.8#6 + pilot:5.8#16
+  primary_selection_rule: >
+    Cheapest closed candidate that passes smoke (decision #6) AND
+    maintains architecture rank in cross-model check (decision #16
+    with Kendall's tau >= 0.67).
+
+  alternate_for_cross_model_check: TBD
+  alternate_source: pilot:5.8#16
+  alternate_selection_rule: >
+    One alternate closed candidate from a different provider family;
+    used in the cross-model stability subsample alongside the primary
+    and one open-weights candidate. Drops back to primary-only after
+    the cross-model check resolves.
+
+  open_weights_for_cross_model_check: TBD
+  open_weights_source: pilot:5.8#16
+
+  summary_model: TBD
+  summary_model_source: pilot:5.8#10
+  summary_model_rule: >
+    Same family as primary at cheaper tier (Haiku 4.5 if primary is
+    Sonnet 4.6, Gemini 3.1 Flash if primary is Gemini 3.1 Pro Preview,
+    GPT-5.4 mini if primary is GPT-5.4). Validated by paired
+    RAPTOR-build comparison; cheap tier kept if |Q_A − Q_B| <= 0.02.
+
+# ─── Smoke-phase rules (Step 1) ───────────────────────────────────────────────
+smoke:
+  source: pilot:5.8#6
+  contexts:
+    - tokens: 5000
+      kind: qasper_smoke
+    - tokens: 150000
+      kind: novelqa_smoke
+    - tokens: 600000
+      kind: novelqa_smoke_long
+  queries_per_context: 1
+  pass_conditions:
+    latency:
+      max_minutes_on_600k: 10
+    parsing:
+      max_malformed_per_3_smokes: 1
+  source_per_pass_condition: pilot:5.8#6
+
+# ─── Cross-model stability check (Phase F, decision #16) ──────────────────────
+cross_model_check:
+  source: pilot:5.8#16
+  subsample:
+    novels: 10
+    qasper_papers: 30
+  N: 1
+  cache_pin_minutes: 5
+  cache_pin_source: pilot:5.8#16
+  models_under_test:
+    - chosen_primary
+    - one_alternate_closed
+    - one_open_weights
+  decision_rule:
+    metric: kendall_tau
+    threshold: 0.67
+    threshold_source: pilot:5.8#16
+    rationale: >
+      tau >= 0.67 corresponds to at most one rank swap among the
+      four architectures. Architecture-matters-more-than-answerer
+      assumption holds when the rank order is preserved across all
+      three answerer models.

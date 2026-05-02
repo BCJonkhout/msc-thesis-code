@@ -1,0 +1,87 @@
+# Embedding encoder selection. Default + escalation chain.
+# See pilot plan § 3.5 and § 5.8 decision #9.
+#
+# Recall@20 against QASPER gold evidence spans on 20 calibration
+# questions is the gate. BGE-M3 ≥ 0.85 keeps the default; otherwise
+# escalate down the chain.
+
+default:
+  id: BAAI/bge-m3
+  dim: 1024
+  max_input_tokens: 8192
+  multi_functionality: true  # dense + sparse + multi-vector retrieval modes
+  source: pilot:5.8#9
+  rationale: >
+    Successor to bge-large-en-v1.5; same family and trust profile,
+    longer 8k chunk ceiling matches RAPTOR leaf budget.
+  released: 2024
+  license: Apache-2.0
+  vector_store: faiss-cpu
+  vector_store_source: pilot:4.4
+
+# ─── Escalation chain (only triggered if default fails Recall@20 gate) ────────
+escalation:
+  - id: Snowflake/snowflake-arctic-embed-l-v2.0
+    dim: 1024
+    max_input_tokens: 8192
+    license: Apache-2.0
+    rationale: >
+      Top open-weights MTEB retrieval candidate at 340M params as of
+      late 2025. Single-GPU friendly. Matryoshka representation learning.
+    released: 2024-11
+    source: pilot:5.8#9-escalation
+
+  - id: nvidia/NV-Embed-v2
+    dim: 4096
+    max_input_tokens: 4096
+    license: open-weights  # verify
+    rationale: >
+      MTEB top overall in its size class as of late 2024. 7B parameters;
+      heavier GPU footprint.
+    released: 2024-09
+    source: pilot:5.8#9-escalation
+
+  - id: intfloat/e5-mistral-7b-instruct
+    dim: 4096
+    max_input_tokens: 4096
+    license: MIT
+    rationale: >
+      Older 7B open-weights option; kept as a safety net only.
+      Replaced as the primary escalation by arctic-embed-l-v2.0.
+    released: 2024
+    source: pilot:5.8#9-escalation
+    status: legacy
+
+  - id: voyage-3-large
+    dim: 2048
+    max_input_tokens: 32768
+    license: closed-API
+    rationale: >
+      Best long-doc-chunk encoder if API dependency is acceptable;
+      ceiling matches a chunk larger than any RAPTOR leaf.
+    pricing_usd_per_1m_input: 0.18
+    source: pilot:5.8#9-escalation
+
+# ─── Legacy fallback (only if all open-weights options fail) ──────────────────
+legacy_fallback:
+  id: BAAI/bge-large-en-v1.5
+  dim: 1024
+  max_input_tokens: 512
+  source: pilot:5.8#9-legacy
+  status: legacy
+  rationale: >
+    Original well-tested baseline. Use only if bge-m3 shows tokenizer
+    or vLLM compatibility issues. 512-token chunk ceiling is the
+    binding constraint that motivated the bge-m3 upgrade.
+
+# ─── Selection gate (decision #9) ─────────────────────────────────────────────
+selection_gate:
+  metric: recall_at_20
+  qasper_gold_evidence_spans: true
+  calibration_pool_size: 20
+  thresholds:
+    pass: 0.85
+    escalate_to_e5: [0.70, 0.85]   # try escalation if BGE-M3 in this range
+    full_escalation_required: 0.70  # below this run e5 + voyage; pick highest
+    halt: 0.50                      # below this Recall@5: chunking is broken
+  source: pilot:5.8#9
