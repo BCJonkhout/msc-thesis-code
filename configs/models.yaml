@@ -6,14 +6,14 @@
 
 # ─── Closed answerer slate (4 candidates enter smoke) ─────────────────────────
 closed_candidates:
-  - id: claude-sonnet-4-6-20260217
+  - id: claude-sonnet-4-6
     provider: anthropic
     context_window_tokens: 1000000
     cache_tier: 1h_extended
     cache_tier_source: provider:platform.claude.com/docs/en/build-with-claude/prompt-caching
     source: pilot:5.8#6
 
-  - id: claude-opus-4-7-20260416
+  - id: claude-opus-4-7
     provider: anthropic
     context_window_tokens: 1000000
     cache_tier: 1h_extended
@@ -34,8 +34,30 @@ closed_candidates:
     cache_tier_source: provider:openai.com/index/gpt-5-1-for-developers/
     source: pilot:5.8#6
 
-# ─── Open-weights candidates (2 enter smoke) ──────────────────────────────────
+# ─── Open-weights candidates (enter smoke; access constraints documented) ────
 open_weights_candidates:
+  - id: qwen/qwen3.6-flash
+    provider: openrouter
+    context_window_tokens: 1000000
+    cache_supported: true
+    cache_tier_source: provider:openrouter.ai/qwen/qwen3.6-flash
+    license: Apache-2.0  # Qwen3.6 line; flash variant inherits
+    released: 2026
+    source: pilot:5.8#6
+    notes: >
+      Substitutes for Qwen3.6-27B because the user does not have access
+      to the 27B variant via DashScope. flash is the cost-optimized
+      Qwen3.6 variant served via OpenRouter; pricing is $0.25/M input
+      (tiered above 256k) + $1.50/M output. OpenRouter routes to
+      whichever underlying provider serves the model best.
+    methodological_caveat: >
+      flash is smaller than the closed candidates (Sonnet 4.6 / Opus 4.7
+      / Gemini 3.1 Pro Preview / GPT-5.4). The cross-model stability
+      check (Phase F) therefore compares 'different model family' AND
+      'different scale' simultaneously rather than isolating the family
+      dimension. Document as a Threats-to-Validity note when reporting
+      the cross-model results.
+
   - id: qwen3.6-27b
     provider: dashscope
     context_window_tokens_native: 262144
@@ -47,6 +69,11 @@ open_weights_candidates:
     license: Apache-2.0
     released: 2026-04-22
     source: pilot:5.8#6
+    status: not_accessible
+    notes: >
+      Original choice; user does not have DashScope access. Kept in
+      the candidate table for documentation but not part of the active
+      smoke slate.
 
   - id: minimax-m2.7
     provider: minimax  # primary; DeepInfra/Together are alternates
@@ -60,6 +87,33 @@ open_weights_candidates:
       Caching support per provider must be verified before locking;
       DeepInfra and Together are open-weights API alternates if
       MiniMax first-party API doesn't support caching.
+
+# ─── Rejected candidates (documented for the audit trail) ────────────────────
+rejected_candidates:
+  - id: gemma-4-26b-a4b-it
+    provider: groq
+    context_window_tokens: 256000  # estimated; Gemma 4 line caps at 256k
+    license: open-weights
+    released: 2026-04-02
+    rejection_reason: context_below_threshold
+    rejection_source: pilot:5.8#5
+    rejection_detail: >
+      256k context insufficient for the NovelQA workload. The longest
+      non-B48 NovelQA novel is ~772k tokens, requiring ~780k usable
+      context after prompt overhead. 256k < 780k threshold.
+
+  - id: gemma-4-31b-it
+    provider: groq
+    context_window_tokens: 256000
+    license: open-weights
+    released: 2026-04-02
+    rejection_reason: context_below_threshold
+    rejection_source: pilot:5.8#5
+    rejection_detail: >
+      Same reason as gemma-4-26b-a4b-it. Despite being free-tier on Groq
+      with strong reasoning quality, the 256k ceiling cannot
+      accommodate the long NovelQA novels that motivate the
+      long-context evaluation.
 
 # ─── Final answerer choices (TBD; locked by pilot Step 7) ─────────────────────
 final_answerer:

@@ -53,13 +53,13 @@ providers:
       extended_tier: 60
     cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
     models:
-      claude-sonnet-4-6-20260217:
+      claude-sonnet-4-6:
         input_uncached: 3.00
         input_cached_read: 0.30
         cache_write_5m: 3.75
         cache_write_1h: 6.00
         output: 15.00
-      claude-opus-4-7-20260416:
+      claude-opus-4-7:
         input_uncached: 5.00
         input_cached_read: 0.50
         cache_write_5m: 6.25
@@ -102,12 +102,40 @@ providers:
     cache_ttl_minutes:
       ephemeral_only: 5  # NO extended tier; binding constraint per audit
     cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    status: not_accessible  # user does not have DashScope access
     models:
       qwen3.6-27b:
         input_uncached: 0.80    # verify on first call; placeholder
         input_cached_read: 0.20 # verify on first call; placeholder
         output: 1.20            # verify on first call; placeholder
         verification_required: true
+
+  openrouter:
+    snapshot_date: 2026-05-02
+    source: provider:openrouter.ai/qwen/qwen3.6-flash
+    cache_ttl_minutes:
+      varies_by_route: true  # OpenRouter routes to underlying providers
+    cache_ttl_source: provider:openrouter.ai/docs/quickstart
+    notes: >
+      OpenRouter is an aggregator that routes requests to underlying
+      providers (Groq, DeepInfra, Together, Fireworks, etc.). Cache
+      behaviour and TTL therefore vary by which provider serves the
+      request. Prompt caching is supported in aggregate; exact TTL
+      should be verified at run time via the per-row
+      `cached_input_tokens` field.
+    models:
+      qwen/qwen3.6-flash:
+        input_uncached_below_256k: 0.25
+        input_uncached_above_256k_tier_factor: 2.0  # placeholder; verify at run time
+        input_cached_read: 0.10  # placeholder; varies by route
+        output_below_256k: 1.50
+        verification_required: true
+        notes: >
+          Tiered pricing kicks in above 256k tokens. Surcharge factor
+          is a placeholder until verified on the first 600k smoke call.
+          For the cross-model subsample (10 novels of up to 772k each),
+          expect roughly 30-50% of input volume to fall in the upper
+          tier.
 
 # ─── Embedding rate cards (closed APIs only; open-weights = local GPU) ────────
 embedding_providers:

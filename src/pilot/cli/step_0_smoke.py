@@ -39,18 +39,20 @@ from pilot.providers import CacheControl, get_provider
 from pilot.provenance import load_and_validate
 
 _PROVIDER_DEFAULT_MODEL = {
-    "anthropic": "claude-sonnet-4-6-20260217",
-    "opus": "claude-opus-4-7-20260416",
+    "anthropic": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-7",
     "openai": "gpt-5.4",
     "gemini": "gemini-3.1-pro-preview",
     "dashscope": "qwen3.6-27b",
+    "openrouter": "qwen/qwen3.6-flash",
 }
 
 _PROVIDER_ENV_VAR = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
-    "gemini": "GOOGLE_API_KEY",
+    "gemini": "GEMINI_API_KEY",   # GeminiProvider also accepts GOOGLE_API_KEY
     "dashscope": "DASHSCOPE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 
@@ -101,7 +103,8 @@ def _check_template_determinism(template_name: str, **slots: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Step 0 plumbing smoke.")
     parser.add_argument("--provider", default="anthropic",
-                        choices=list(_PROVIDER_DEFAULT_MODEL.keys()))
+                        choices=list(_PROVIDER_DEFAULT_MODEL.keys()),
+                        help="Provider for the smoke (default: anthropic).")
     parser.add_argument("--model", default=None,
                         help="Override the default model for this provider.")
     parser.add_argument("--configs-dir", type=Path,

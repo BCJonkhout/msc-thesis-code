@@ -10,7 +10,7 @@ from pilot.providers import (
 )
 
 
-@pytest.mark.parametrize("name", ["anthropic", "openai", "gemini", "dashscope"])
+@pytest.mark.parametrize("name", ["anthropic", "openai", "gemini", "dashscope", "openrouter"])
 def test_factory_returns_provider(name: str) -> None:
     """Each adapter resolves to an AnswererProvider subclass without making any API call.
 
@@ -43,7 +43,7 @@ def test_provider_call_signature() -> None:
         "top_p",
         "cache_control",
     }
-    for name in ("anthropic", "openai", "gemini", "dashscope"):
+    for name in ("anthropic", "openai", "gemini", "dashscope", "openrouter"):
         provider = get_provider(name)
         sig = inspect.signature(provider.call)
         kwargs_in_sig = {

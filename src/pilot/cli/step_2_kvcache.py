@@ -42,22 +42,29 @@ from pilot.sanity.kvcache_check import CacheCheckResult, run_cache_check
 # matters here, not which model — but using the cheapest 1M-context
 # model per stack keeps the cost bounded.
 _DEFAULT_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-6-20260217",
+    "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-5.4",
     "gemini": "gemini-3.1-pro-preview",
     "dashscope": "qwen3.6-27b",
+    "openrouter": "qwen/qwen3.6-flash",
 }
 
-_ENV_VAR: dict[str, str] = {
+_ENV_VAR: dict[str, str | tuple[str, ...]] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
-    "gemini": "GOOGLE_API_KEY",
+    "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "dashscope": "DASHSCOPE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
+
+
+def _env_var_names(name: str) -> tuple[str, ...]:
+    raw = _ENV_VAR[name]
+    return (raw,) if isinstance(raw, str) else raw
 
 
 def _provider_has_key(name: str) -> bool:
-    return bool(os.environ.get(_ENV_VAR[name]))
+    return any(os.environ.get(v) for v in _env_var_names(name))
 
 
 def _verdict_for_provider(
@@ -69,10 +76,11 @@ def _verdict_for_provider(
 ) -> dict[str, Any]:
     """Run the single-provider check and wrap the result with status fields."""
     if not _provider_has_key(name):
+        var_names = " or ".join(_env_var_names(name))
         return {
             "provider": name,
             "status": "skipped",
-            "reason": f"{_ENV_VAR[name]} not set in environment",
+            "reason": f"{var_names} not set in environment",
         }
 
     use_model = model or _DEFAULT_MODELS[name]

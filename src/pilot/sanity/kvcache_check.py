@@ -101,8 +101,15 @@ def run_cache_check(
     )
 
     latency_ratio = r2.wallclock_s / r1.wallclock_s if r1.wallclock_s > 0 else float("inf")
+    # Cached-token ratio is computed against the FIRST CALL's actual
+    # input-token count (not the rough doc_tokens_estimate which uses
+    # 4 chars/token and overestimates real tokenizer output by ~25-35%).
+    # The question we want to answer is: "did the second call's cache
+    # reuse the prefix we sent on the first call?" — so the right
+    # denominator is the first call's input token count.
+    first_call_input = r1.uncached_input_tokens + r1.cached_input_tokens
     cached_token_ratio = (
-        r2.cached_input_tokens / max(doc_tokens, 1)
+        r2.cached_input_tokens / first_call_input if first_call_input > 0 else 0.0
     )
 
     latency_pass = latency_ratio <= 0.4

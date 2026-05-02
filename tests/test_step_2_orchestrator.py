@@ -64,7 +64,9 @@ def test_no_keys_returns_all_skipped(tmp_path: Path) -> None:
         )
 
     assert summary["providers_tested"] == []
-    assert set(summary["providers_skipped"]) == {"anthropic", "openai", "gemini", "dashscope"}
+    assert set(summary["providers_skipped"]) == {
+        "anthropic", "openai", "gemini", "dashscope", "openrouter"
+    }
     assert summary["all_passed"] is False
     assert summary["any_passed"] is False
     # Verdict file must still be written for the audit trail.

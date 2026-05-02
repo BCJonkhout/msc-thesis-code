@@ -54,14 +54,25 @@ class AnthropicProvider(AnswererProvider):
             extra_headers["anthropic-beta"] = "extended-cache-ttl-2025-04-11"
         # DISABLED: leave the block bare; no cache hit will register.
 
+        # Anthropic rejects sending both temperature and top_p on newer
+        # Claude models (Sonnet 4.6+, Opus 4.7+). With T=0 (greedy) top_p
+        # is irrelevant, so we send only temperature in that case. For
+        # T>0 we send only top_p when it differs from the default 1.0.
+        sampling_kwargs: dict = {}
+        if temperature == 0.0:
+            sampling_kwargs["temperature"] = 0.0
+        elif top_p != 1.0:
+            sampling_kwargs["top_p"] = top_p
+        else:
+            sampling_kwargs["temperature"] = temperature
+
         start = time.perf_counter()
         response = self._client.messages.create(
             model=model,
             max_tokens=max_tokens if max_tokens is not None else 1024,
-            temperature=temperature,
-            top_p=top_p,
             messages=[{"role": "user", "content": [content_block]}],
             extra_headers=extra_headers or None,
+            **sampling_kwargs,
         )
         elapsed = time.perf_counter() - start
 
