@@ -18,7 +18,9 @@ outputs/*
 !outputs/.gitkeep
 
 # Datasets and prepared splits — kept locally, not committed
-data/
+# (anchored to the repo root so it does not match src/pilot/data/, which
+# is the dataset acquisition module).
+/data/
 
 # Model weight downloads
 weights/

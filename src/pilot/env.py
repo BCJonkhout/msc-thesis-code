@@ -15,6 +15,7 @@ load is idempotent.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -36,4 +37,13 @@ def load_env(*, override: bool = True) -> list[Path]:
         if path.exists() and path.resolve() not in {p.resolve() for p in loaded}:
             load_dotenv(path, override=override)
             loaded.append(path)
+
+    # HuggingFace SDK reads HF_TOKEN; the .env stores the same value
+    # under HUGGINGFACE_ACCESS_TOKEN to match the human-readable name
+    # of the credential field in the provider dashboard. Mirror it
+    # into HF_TOKEN so the SDK picks it up without further config.
+    hf_token = os.environ.get("HUGGINGFACE_ACCESS_TOKEN")
+    if hf_token and not os.environ.get("HF_TOKEN"):
+        os.environ["HF_TOKEN"] = hf_token
+
     return loaded
