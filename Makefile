@@ -11,8 +11,12 @@ ifneq (,$(wildcard .venv/bin/python))
 endif
 
 .PHONY: test \
-	step-0 step-1 step-2 step-3-encoder \
-	data-download build-calibration
+	step-0 step-1 step-2 step-3-encoder step-3-dry-run \
+	step-3-dry-run-flat step-3-dry-run-naive-rag \
+	step-3-dry-run-raptor step-3-dry-run-graphrag \
+	step-3-summary \
+	data-download build-calibration \
+	codabench-format codabench-submit codabench-extract
 
 test:
 	@$(PYTHON) -m pytest tests/ -v
@@ -29,8 +33,40 @@ step-2:
 step-3-encoder:
 	@$(PYTHON) -m pilot.cli.step_3_encoder_recall
 
+step-3-dry-run:
+	@$(PYTHON) -m pilot.cli.step_3_dry_run
+
+step-3-dry-run-flat:
+	@$(PYTHON) -m pilot.cli.step_3_dry_run --architectures flat
+
+step-3-dry-run-naive-rag:
+	@$(PYTHON) -m pilot.cli.step_3_dry_run --architectures naive_rag
+
+step-3-dry-run-raptor:
+	@$(PYTHON) -m pilot.cli.step_3_dry_run --architectures raptor
+
+step-3-dry-run-graphrag:
+	@$(PYTHON) -m pilot.cli.step_3_dry_run --architectures graphrag
+
+step-3-summary:
+	@test -n "$(RUN)" || (echo "RUN=<run_id> is required" >&2; exit 1)
+	@$(PYTHON) -m pilot.cli.step_3_summary --run outputs/runs/$(RUN)
+
 data-download:
 	@$(PYTHON) -m pilot.data.download
 
 build-calibration:
 	@$(PYTHON) -m pilot.data.build_calibration_pool
+
+codabench-format:
+	@test -n "$(PRED)" || (echo "PRED=<predictions.jsonl path> is required" >&2; exit 1)
+	@test -n "$(OUT)" || (echo "OUT=<submission.zip path> is required" >&2; exit 1)
+	@$(PYTHON) -m pilot.codabench.format --predictions $(PRED) --out $(OUT)
+
+codabench-submit:
+	@test -n "$(ZIP)" || (echo "ZIP=<submission.zip path> is required" >&2; exit 1)
+	@$(PYTHON) -m pilot.codabench.submit --zip $(ZIP)
+
+codabench-extract:
+	@test -n "$(SID)" || (echo "SID=<submission_id> is required" >&2; exit 1)
+	@$(PYTHON) -m pilot.codabench.extract_score --submission-id $(SID)
