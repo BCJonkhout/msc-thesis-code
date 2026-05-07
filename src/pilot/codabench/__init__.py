@@ -29,5 +29,11 @@ from pilot.codabench.format import (
     build_res_mc,
     write_submission_zip,
 )
+from pilot.codabench.extract_score import extract_mc_accuracy
 
-__all__ = ["NOVELQA_PLACEHOLDER_LETTER", "build_res_mc", "write_submission_zip"]
+__all__ = [
+    "NOVELQA_PLACEHOLDER_LETTER",
+    "build_res_mc",
+    "extract_mc_accuracy",
+    "write_submission_zip",
+]
