@@ -301,58 +301,77 @@ def run_dry_run(
     )
     failures: list[dict[str, Any]] = []
 
+    # Open per-arch JSONL files for incremental writes so a crash mid-run
+    # does not lose all predictions. The end-of-loop write below is now
+    # redundant for completed rows but is kept as a no-op safety net.
+    pred_files: dict[str, Any] = {
+        arch: (ledger.run_dir / f"{arch}_predictions.jsonl").open(
+            "w", encoding="utf-8"
+        )
+        for arch in architectures
+    }
+
     print(f"[step3-dry-run] run_id={run_id} items={len(items)} archs={architectures}", file=sys.stderr)
 
-    for item in items:
-        for arch in architectures:
-            tag = f"{arch}/{item['dataset']}/{item['paper_id']}/{item['question_id']}"
-            try:
-                result = _invoke_architecture(
-                    arch,
-                    item,
-                    answerer=answerer,
-                    answerer_model=answerer_model,
-                    embedder=embedder,
-                    chunker=chunker,
-                    ledger=ledger,
-                    naive_rag_top_k=naive_rag_top_k,
-                )
-            except Exception as exc:
-                failures.append({
-                    "architecture": arch,
+    try:
+        for item in items:
+            for arch in architectures:
+                tag = f"{arch}/{item['dataset']}/{item['paper_id']}/{item['question_id']}"
+                try:
+                    result = _invoke_architecture(
+                        arch,
+                        item,
+                        answerer=answerer,
+                        answerer_model=answerer_model,
+                        embedder=embedder,
+                        chunker=chunker,
+                        ledger=ledger,
+                        naive_rag_top_k=naive_rag_top_k,
+                    )
+                except Exception as exc:
+                    failures.append({
+                        "architecture": arch,
+                        "dataset": item["dataset"],
+                        "paper_id": item["paper_id"],
+                        "question_id": item["question_id"],
+                        "error": repr(exc),
+                        "traceback": traceback.format_exc(),
+                    })
+                    print(f"[step3-dry-run] FAIL {tag}: {exc!r}", file=sys.stderr)
+                    continue
+
+                scores = _score_item(item, result)
+                row = {
                     "dataset": item["dataset"],
                     "paper_id": item["paper_id"],
                     "question_id": item["question_id"],
-                    "error": repr(exc),
-                    "traceback": traceback.format_exc(),
-                })
-                print(f"[step3-dry-run] FAIL {tag}: {exc!r}", file=sys.stderr)
-                continue
+                    "question": item["question"],
+                    "predicted_answer": result.predicted_answer,
+                    "retrieved_chunks_count": len(result.retrieved_evidence_sentences),
+                    **scores,
+                }
+                per_arch_predictions[arch].append(row)
+                # Crash-safe incremental flush.
+                pred_files[arch].write(json.dumps(row, ensure_ascii=False) + "\n")
+                pred_files[arch].flush()
+                for metric, value in scores.items():
+                    if isinstance(value, (int, float)):
+                        per_arch_scores[arch][metric].append(float(value))
+                print(
+                    f"[step3-dry-run] OK   {tag}  "
+                    + " ".join(
+                        f"{m}={v:.3f}" for m, v in scores.items()
+                        if isinstance(v, (int, float))
+                    ),
+                    file=sys.stderr,
+                )
+    finally:
+        for fh in pred_files.values():
+            fh.close()
 
-            scores = _score_item(item, result)
-            row = {
-                "dataset": item["dataset"],
-                "paper_id": item["paper_id"],
-                "question_id": item["question_id"],
-                "question": item["question"],
-                "predicted_answer": result.predicted_answer,
-                "retrieved_chunks_count": len(result.retrieved_evidence_sentences),
-                **scores,
-            }
-            per_arch_predictions[arch].append(row)
-            for metric, value in scores.items():
-                if isinstance(value, (int, float)):
-                    per_arch_scores[arch][metric].append(float(value))
-            print(
-                f"[step3-dry-run] OK   {tag}  "
-                + " ".join(
-                    f"{m}={v:.3f}" for m, v in scores.items()
-                    if isinstance(v, (int, float))
-                ),
-                file=sys.stderr,
-            )
-
-    # Write per-arch predictions to ledger run dir.
+    # End-of-loop pass: rewrite the per-arch JSONL files cleanly. Useful
+    # when re-running an aborted job from in-memory state; harmless when
+    # the incremental flush already covered everything.
     for arch, rows in per_arch_predictions.items():
         path = ledger.run_dir / f"{arch}_predictions.jsonl"
         with path.open("w", encoding="utf-8") as fh:
