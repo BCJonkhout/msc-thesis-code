@@ -124,6 +124,7 @@ def test_write_submission_zip_creates_correct_layout(
         predictions_jsonl=predictions_jsonl,
         output_zip=out,
         data_root=fake_data_root,
+        include_gen_stub=False,
     )
     assert out.exists()
     with zipfile.ZipFile(out) as zf:
@@ -134,6 +135,31 @@ def test_write_submission_zip_creates_correct_layout(
     assert body["Mrs. Dalloway"][1] == "B"  # the one we predicted
     assert stats["output_zip"] == str(out)
     assert stats["output_zip_bytes"] > 0
+
+
+def test_write_submission_zip_with_gen_stub(
+    fake_data_root: Path, predictions_jsonl: Path, tmp_path: Path
+):
+    """The default include_gen_stub=True adds res_gen/ to work around
+    the platform's scoring-script crash on res_mc-only submissions."""
+    out = tmp_path / "submission_with_gen.zip"
+    stats = write_submission_zip(
+        predictions_jsonl=predictions_jsonl,
+        output_zip=out,
+        data_root=fake_data_root,
+    )
+    with zipfile.ZipFile(out) as zf:
+        names = sorted(zf.namelist())
+        assert names == [
+            "res_gen/key",
+            "res_gen/res_gen.json",
+            "res_mc/res_mc.json",
+        ]
+        gen = json.loads(zf.read("res_gen/res_gen.json").decode("utf-8"))
+        # Empty strings, one per question, keyed by novel title.
+        assert gen["Mrs. Dalloway"] == ["", "", ""]
+        assert gen["Rebecca of Sunnybrook Farm"] == ["", ""]
+    assert stats["include_gen_stub"] is True
 
 
 def test_explicit_placeholder_override(

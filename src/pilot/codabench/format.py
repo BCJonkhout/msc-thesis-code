@@ -56,14 +56,62 @@ def _question_order_per_novel(data_root: Path) -> dict[str, list[str]]:
     The JSONL was written by ``pilot.data.download.download_novelqa``
     by iterating ``Data/PublicDomain/B*.json`` and preserving each
     file's key insertion order, which is the canonical order the
-    leaderboard expects.
+    leaderboard expects. Copyright-protected novels are read from the
+    same HuggingFace snapshot's ``Data/CopyrightProtected/B*.json``
+    files so the submission can include all 89 novels (the leaderboard
+    expects every novel; predictions for novels we can't run end-to-end
+    are filled with the placeholder letter).
     """
     questions = _load_jsonl(data_root / "novelqa" / "questions.jsonl")
     per_novel: dict[str, list[str]] = {}
     for q in questions:
         nid = q["novel_id"]
         per_novel.setdefault(nid, []).append(q["question_id"])
+
+    # Also include the copyright-protected novels' QIDs from the HF snapshot.
+    # Their questions live in the same NovelQA.zip but were not extracted to
+    # questions.jsonl by download_novelqa (we skip them because the texts
+    # are withheld). For the submission we still need the QID order so the
+    # platform-side scorer can match indices.
+    cp_path = _find_copyright_protected_qids()
+    for nid, qids in cp_path.items():
+        per_novel.setdefault(nid, []).extend(qids)
+
     return per_novel
+
+
+def _find_copyright_protected_qids() -> dict[str, list[str]]:
+    """Walk the HF NovelQA snapshot's CopyrightProtected/B*.json files
+    and return per-BID question-id orderings. Returns {} if the
+    snapshot isn't on disk."""
+    import os
+    import zipfile
+
+    hf_cache = Path(
+        os.environ.get("HF_HOME")
+        or os.environ.get("HUGGINGFACE_HUB_CACHE")
+        or (Path.home() / ".cache" / "huggingface")
+    )
+    snapshots = hf_cache / "hub" / "datasets--NovelQA--NovelQA" / "snapshots"
+    if not snapshots.exists():
+        return {}
+    for snap in snapshots.iterdir():
+        zip_path = snap / "NovelQA.zip"
+        if not zip_path.exists():
+            continue
+        out: dict[str, list[str]] = {}
+        with zipfile.ZipFile(zip_path) as zf:
+            for member in zf.namelist():
+                if not member.startswith("Data/CopyrightProtected/"):
+                    continue
+                if not member.endswith(".json"):
+                    continue
+                novel_id = Path(member).stem
+                with zf.open(member) as fh:
+                    qmap = json.loads(fh.read().decode("utf-8"))
+                out[novel_id] = list(qmap.keys())
+        return out
+    return {}
 
 
 def _novel_titles(data_root: Path) -> dict[str, str]:
@@ -151,10 +199,28 @@ def write_submission_zip(
     *,
     data_root: Path | None = None,
     placeholder: str = NOVELQA_PLACEHOLDER_LETTER,
+    include_gen_stub: bool = True,
 ) -> dict[str, Any]:
     """Write a Codabench-ready submission.zip containing res_mc/res_mc.json.
 
-    Returns the stats dict from ``build_res_mc`` plus the output path.
+    When ``include_gen_stub=True`` (default) the zip also contains
+    ``res_gen/res_gen.json`` populated with the same per-novel
+    structure (each value being a list of empty strings, one per
+    question) plus a stub ``res_gen/key`` with a placeholder string.
+    This works around a bug in the platform's scoring script that
+    references ``cr_gen_score`` even when only res_mc was uploaded:
+
+        UnboundLocalError: local variable 'cr_gen_score'
+        referenced before assignment
+
+    The stub generative answers are empty strings, which the
+    GPT-4 judge will score uniformly wrong; the stub OpenAI key is
+    not a real key and its calls will fail. The point is only to
+    make the platform's scoring container reach the
+    ``cr_gen_score`` print without crashing on the MC results.
+
+    Returns the stats dict from ``build_res_mc`` plus the output
+    path and a flag indicating whether the gen stub was included.
     """
     res_mc, stats = build_res_mc(
         predictions_jsonl, data_root=data_root, placeholder=placeholder
@@ -162,8 +228,16 @@ def write_submission_zip(
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("res_mc/res_mc.json", json.dumps(res_mc, ensure_ascii=False))
+        if include_gen_stub:
+            res_gen = {title: ["" for _ in letters] for title, letters in res_mc.items()}
+            zf.writestr("res_gen/res_gen.json", json.dumps(res_gen, ensure_ascii=False))
+            # Empty key file; OpenAI calls in the platform's gen scorer
+            # will fail but the scoring script will still set the variable
+            # the platform downstream code references.
+            zf.writestr("res_gen/key", "sk-stub-not-a-real-key")
     stats["output_zip"] = str(output_zip)
     stats["output_zip_bytes"] = output_zip.stat().st_size
+    stats["include_gen_stub"] = include_gen_stub
     return stats
 
 
@@ -184,11 +258,23 @@ def main() -> int:
     parser.add_argument(
         "--placeholder", default=NOVELQA_PLACEHOLDER_LETTER, choices=list("ABCD")
     )
+    parser.add_argument(
+        "--no-gen-stub",
+        action="store_true",
+        help=(
+            "Skip the res_gen/ stub. Required only if you have a real "
+            "GPT-4 key and want to submit to the generative subtask. "
+            "Without this flag, an empty res_gen/res_gen.json + stub "
+            "res_gen/key are added to work around a platform-side "
+            "scoring-script crash on res_mc-only submissions."
+        ),
+    )
     args = parser.parse_args()
     stats = write_submission_zip(
         predictions_jsonl=args.predictions,
         output_zip=args.out,
         placeholder=args.placeholder,
+        include_gen_stub=not args.no_gen_stub,
     )
     print(json.dumps(stats, indent=2))
     return 0 if stats["covered_by_predictions"] > 0 else 1
