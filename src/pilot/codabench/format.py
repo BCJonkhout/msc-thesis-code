@@ -77,7 +77,10 @@ def _predictions_by_question(predictions_jsonl: Path) -> dict[tuple[str, str], s
     """Index a predictions JSONL by (novel_id, question_id) → predicted letter.
 
     Skips QASPER rows (which have no `predicted_letter`) and rows
-    where the parser could not extract a letter.
+    where the parser could not extract a letter. The per-row
+    identifier field is ``paper_id`` regardless of dataset (set by
+    ``step_3_dry_run.run_dry_run``); for NovelQA rows it carries
+    the BID (e.g. "B01") so we re-name it ``novel_id`` here.
     """
     rows = _load_jsonl(predictions_jsonl)
     out: dict[tuple[str, str], str] = {}
@@ -87,7 +90,11 @@ def _predictions_by_question(predictions_jsonl: Path) -> dict[tuple[str, str], s
         letter = row.get("predicted_letter")
         if not isinstance(letter, str) or letter not in {"A", "B", "C", "D"}:
             continue
-        out[(row["novel_id"], row["question_id"])] = letter.upper()
+        novel_id = row.get("novel_id") or row.get("paper_id")
+        question_id = row.get("question_id")
+        if not novel_id or not question_id:
+            continue
+        out[(novel_id, question_id)] = letter.upper()
     return out
 
 
