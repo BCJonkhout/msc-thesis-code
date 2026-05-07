@@ -20,6 +20,12 @@ dependencies = [
     "huggingface_hub>=0.27.0",
     "langchain-text-splitters>=0.3.5",
     "tiktoken>=0.8.0",
+    # RAPTOR clustering: GMM with BIC sweep over UMAP-reduced embeddings.
+    # Both deps are required by the vendored third_party/raptor/cluster_utils.py.
+    "scikit-learn>=1.4.0",
+    "umap-learn>=0.5.5",
+    "tenacity>=8.2.3",
+    "faiss-cpu>=1.7.4",
 ]
 
 [project.optional-dependencies]
