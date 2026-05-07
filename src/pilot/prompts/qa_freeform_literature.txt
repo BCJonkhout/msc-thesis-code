@@ -1,0 +1,8 @@
+Answer the following question based on the provided context. Be concise and specific; for yes/no questions reply with one word.
+
+Context:
+{context}
+
+Question: {query}
+
+Answer:

@@ -108,26 +108,36 @@ def _login_with_password(
         )
     csrf_form_token = csrf_match.group(1)
 
-    # 2. POST credentials.
+    # 2. POST credentials. Codabench's login form uses the field name
+    # ``username`` (not Django allauth's default ``login``); the
+    # password field is ``password``. Empirically determined from the
+    # rendered HTML; see https://github.com/codalab/codabench.
     response = client.post(
         "/accounts/login/",
         data={
-            "login": username,
+            "username": username,
             "password": password,
             "csrfmiddlewaretoken": csrf_form_token,
         },
         headers={"Referer": f"{_BASE_URL}/accounts/login/"},
         follow_redirects=False,
     )
-    # 302 to /profile or similar is a successful login; 200 with the
-    # login form re-rendered means failure.
+    # On success Codabench redirects (301/302) to the homepage or
+    # /profile/; on failure it re-renders the form with status 200
+    # plus the same form on the page. Detect both.
     if response.status_code in (301, 302):
         return
-    if response.status_code == 200 and "id_login" in response.text:
-        raise RuntimeError(
-            "Codabench rejected the credentials. Check CODABENCH_USERNAME "
-            "and CODABENCH_PASSWORD in .env."
-        )
+    if response.status_code == 200:
+        body = response.text or ""
+        if 'name="username"' in body and 'name="password"' in body:
+            raise RuntimeError(
+                "Codabench rejected the credentials. Check CODABENCH_USERNAME "
+                "and CODABENCH_PASSWORD in .env."
+            )
+        # 200 without the form usually means success-with-no-redirect
+        # (some allauth configs do this). Treat as success if the
+        # session cookie landed.
+        return
     response.raise_for_status()
 
 
@@ -309,7 +319,11 @@ def submit_zip(
     if not zip_path.exists():
         raise FileNotFoundError(f"missing submission zip: {zip_path}")
 
-    with _build_authenticated_client() as client:
+    # _build_authenticated_client returns an already-open httpx client
+    # (login uses it internally), so we close it manually rather than
+    # re-entering it via `with`, which httpx forbids.
+    client = _build_authenticated_client()
+    try:
         dataset = _initiate_dataset(client, zip_path=zip_path)
         signed_url = dataset.get("file_url") or dataset.get("upload_url") or dataset.get("sassy_url")
         if not signed_url:
@@ -337,6 +351,8 @@ def submit_zip(
             client, sub_id, poll_interval_s=poll_interval_s, timeout_s=timeout_s
         )
         leaderboard = _fetch_leaderboard(client)
+    finally:
+        client.close()
 
     return SubmissionResult(
         submission_id=sub_id,

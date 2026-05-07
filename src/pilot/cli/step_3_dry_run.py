@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from pilot.architectures import ArchitectureResult, run_flat, run_naive_rag
+from pilot.architectures.raptor import run_raptor
 from pilot.encoders import OllamaEmbedder, SentenceBoundaryChunker
 from pilot.env import load_env
 from pilot.eval import (
@@ -202,6 +203,7 @@ def _invoke_architecture(
     chunker: SentenceBoundaryChunker | None,
     ledger: CostLedger,
     naive_rag_top_k: int,
+    prompt_style: str = "pilot",
 ) -> ArchitectureResult:
     if architecture == "flat":
         return run_flat(
@@ -212,6 +214,7 @@ def _invoke_architecture(
             answerer_model=answerer_model,
             ledger=ledger,
             cache_control=CacheControl.EPHEMERAL_5MIN,
+            prompt_style=prompt_style,
         )
     if architecture == "naive_rag":
         if embedder is None or chunker is None:
@@ -227,6 +230,20 @@ def _invoke_architecture(
             ledger=ledger,
             top_k=naive_rag_top_k,
             cache_control=CacheControl.EPHEMERAL_5MIN,
+            prompt_style=prompt_style,
+        )
+    if architecture == "raptor":
+        if embedder is None:
+            raise RuntimeError("raptor requires embedder")
+        return run_raptor(
+            document=item["document"],
+            query=item["question"],
+            options=item["options"],
+            answerer=answerer,
+            answerer_model=answerer_model,
+            summary_model=None,  # default to answerer model; can override per Step 3 #10
+            embedder=embedder,
+            ledger=ledger,
         )
     raise ValueError(f"unsupported architecture: {architecture}")
 
@@ -277,6 +294,7 @@ def run_dry_run(
     naive_rag_top_k: int,
     data_root: Path,
     out_dir: Path,
+    prompt_style: str = "pilot",
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     if "qasper" in datasets:
@@ -288,7 +306,8 @@ def run_dry_run(
         raise SystemExit("calibration pool is empty; run make build-calibration")
 
     answerer = get_provider(answerer_provider)
-    embedder = OllamaEmbedder(model=embedder_model) if "naive_rag" in architectures else None
+    needs_embedder = bool({"naive_rag", "raptor"} & set(architectures))
+    embedder = OllamaEmbedder(model=embedder_model) if needs_embedder else None
     chunker = SentenceBoundaryChunker(chunk_size_tokens=384, overlap_tokens=0) if "naive_rag" in architectures else None
 
     run_id = new_run_id()
@@ -327,6 +346,7 @@ def run_dry_run(
                         chunker=chunker,
                         ledger=ledger,
                         naive_rag_top_k=naive_rag_top_k,
+                        prompt_style=prompt_style,
                     )
                 except Exception as exc:
                     failures.append({
@@ -399,6 +419,7 @@ def run_dry_run(
         "answerer_model": answerer_model,
         "embedder_model": embedder_model,
         "naive_rag_top_k": naive_rag_top_k,
+        "prompt_style": prompt_style,
         "items_count": len(items),
         "per_arch_counts": {
             arch: len(rows) for arch, rows in per_arch_predictions.items()
@@ -434,6 +455,18 @@ def main() -> int:
     parser.add_argument("--answerer-model", default=_DEFAULT_ANSWERER_MODEL)
     parser.add_argument("--embedder-model", default=_DEFAULT_EMBEDDER_MODEL)
     parser.add_argument("--naive-rag-top-k", type=int, default=8)
+    parser.add_argument(
+        "--prompt-style",
+        choices=["pilot", "literature"],
+        default="pilot",
+        help=(
+            "Free-form QA prompt style. 'pilot' (default) uses the "
+            "abstention-encouraging template; 'literature' uses the "
+            "concise-answer template comparable to RAPTOR / Self-RAG / "
+            "RAG published QASPER baselines. MC questions are unaffected "
+            "in either mode."
+        ),
+    )
     parser.add_argument("--data-root", type=Path, default=_project_root() / "data")
     parser.add_argument(
         "--out", type=Path, default=_project_root() / "outputs" / "sanity"
@@ -449,6 +482,7 @@ def main() -> int:
         naive_rag_top_k=args.naive_rag_top_k,
         data_root=args.data_root,
         out_dir=args.out,
+        prompt_style=args.prompt_style,
     )
     print(json.dumps(summary, indent=2))
     print(f"\nWrote verdict: {summary['verdict_path']}", file=sys.stderr)

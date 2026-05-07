@@ -66,6 +66,7 @@ def run_naive_rag(
     cache_control: CacheControl = CacheControl.EPHEMERAL_5MIN,
     max_tokens: int = 256,
     temperature: float = 0.0,
+    prompt_style: str = "pilot",
 ) -> ArchitectureResult:
     """Naive RAG: chunk → embed → top-k cosine retrieve → answer."""
     chunks = chunker.chunk(document)
@@ -114,7 +115,9 @@ def run_naive_rag(
 
     retrieved_chunk_texts = [chunks[i].text for i in topk]
     context = "\n\n".join(retrieved_chunk_texts)
-    prompt = _render_prompt(context=context, query=query, options=options)
+    prompt = _render_prompt(
+        context=context, query=query, options=options, prompt_style=prompt_style
+    )
 
     with ledger.log_call(
         architecture="naive_rag",

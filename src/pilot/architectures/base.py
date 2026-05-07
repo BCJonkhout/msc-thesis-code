@@ -55,8 +55,25 @@ def _render_prompt(
     context: str,
     query: str,
     options: dict[str, str] | None,
+    prompt_style: str = "pilot",
 ) -> str:
-    """Render the right template for the task format."""
+    """Render the right template for the task format.
+
+    ``prompt_style`` selects between two free-form QA templates:
+
+      - "pilot" (default): the conservative pilot template with the
+        ``respond exactly with `I do not know``` clause. The MC template
+        is paired with this style.
+      - "literature": a literature-standard concise-answer template
+        without the abstention instruction. Used for benchmark
+        comparability runs (Step 5 prompt-wording ablation per pilot
+        plan § 5 Step 5). MC questions also use the standard MC
+        template — letter-choice format is unchanged.
+
+    Multiple-choice questions always use the MC template regardless
+    of ``prompt_style``; the MC format does not have the abstention
+    issue that motivates the dual-prompt comparison for free-form.
+    """
     if options:
         template = load_template("qa_multiplechoice")
         return template.render(
@@ -64,7 +81,10 @@ def _render_prompt(
             query=query,
             options=_format_options_block(options),
         )
-    template = load_template("qa_freeform")
+    if prompt_style == "literature":
+        template = load_template("qa_freeform_literature")
+    else:
+        template = load_template("qa_freeform")
     return template.render(context=context, query=query)
 
 
@@ -80,6 +100,7 @@ def run_flat(
     cache_control: CacheControl = CacheControl.EPHEMERAL_5MIN,
     max_tokens: int = 256,
     temperature: float = 0.0,
+    prompt_style: str = "pilot",
 ) -> ArchitectureResult:
     """Flat full-context: send entire document + query to the answerer.
 
@@ -88,8 +109,15 @@ def run_flat(
     flat full-context has no notion of evidence selection (the model
     sees everything and the cost-vs-quality tradeoff is the
     measurement we care about).
+
+    ``prompt_style`` selects between the conservative pilot template
+    and the literature-standard concise-answer template (Step 5
+    prompt-wording ablation per pilot plan § 5 Step 5). MC questions
+    are unaffected; both styles share the same MC template.
     """
-    prompt = _render_prompt(context=document, query=query, options=options)
+    prompt = _render_prompt(
+        context=document, query=query, options=options, prompt_style=prompt_style
+    )
 
     with ledger.log_call(
         architecture="flat",
