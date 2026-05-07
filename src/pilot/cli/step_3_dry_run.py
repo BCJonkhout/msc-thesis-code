@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from pilot.architectures import ArchitectureResult, run_flat, run_naive_rag
+from pilot.architectures.graphrag import run_graphrag
 from pilot.architectures.raptor import run_raptor
 from pilot.encoders import OllamaEmbedder, SentenceBoundaryChunker
 from pilot.env import load_env
@@ -245,6 +246,18 @@ def _invoke_architecture(
             embedder=embedder,
             ledger=ledger,
         )
+    if architecture == "graphrag":
+        if embedder is None:
+            raise RuntimeError("graphrag requires embedder")
+        return run_graphrag(
+            document=item["document"],
+            query=item["question"],
+            options=item["options"],
+            answerer=answerer,
+            answerer_model=answerer_model,
+            embedder=embedder,
+            ledger=ledger,
+        )
     raise ValueError(f"unsupported architecture: {architecture}")
 
 
@@ -306,7 +319,7 @@ def run_dry_run(
         raise SystemExit("calibration pool is empty; run make build-calibration")
 
     answerer = get_provider(answerer_provider)
-    needs_embedder = bool({"naive_rag", "raptor"} & set(architectures))
+    needs_embedder = bool({"naive_rag", "raptor", "graphrag"} & set(architectures))
     embedder = OllamaEmbedder(model=embedder_model) if needs_embedder else None
     chunker = SentenceBoundaryChunker(chunk_size_tokens=384, overlap_tokens=0) if "naive_rag" in architectures else None
 
