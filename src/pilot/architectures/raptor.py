@@ -8,6 +8,13 @@ summarisation, and QA call through ``CostLedger`` so RAPTOR's
 per-call cost is observable on the same footing as the other
 architectures.
 
+**Native-thread requirement.** UMAP+GMM clustering inside the
+vendored repo segfaults on Windows when numba and OpenMP threading
+are at their default settings (the JIT triggers a SIGSEGV during
+"Constructing Layer 0"). Setting ``OMP_NUM_THREADS=1`` and
+``NUMBA_NUM_THREADS=1`` on import resolves it. We do this inside
+the module so callers don't have to remember.
+
 Per the RAPTOR research brief (`thesis-msc/notes/pilot_findings.md`,
 Step 3 RAPTOR section), the configuration matches Sarthi et al.
 2024 *over* the official-repo defaults where they diverge:
@@ -29,8 +36,17 @@ applies uniformly.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+# UMAP+GMM clustering inside the vendored RAPTOR repo segfaults on
+# Windows under default numba+OpenMP threading. Pinning to single
+# thread resolves it without touching the upstream source. The pins
+# are applied at import time so callers don't have to remember; if
+# the user has already exported these variables, those values win.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 from pilot.architectures.base import ArchitectureResult
 from pilot.encoders import OllamaEmbedder
