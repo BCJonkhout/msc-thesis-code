@@ -180,17 +180,33 @@ class _LedgerSummarizationModel(BaseSummarizationModel):
 # QA adapter
 # ──────────────────────────────────────────────────────────────────────
 
-# Verbatim from raptor/QAModels.GPT4QAModel.answer_question — the
-# free-form prompt used by the official repo for QASPER-style runs.
-# (The "folloing" typo is preserved for fidelity to the upstream
-# implementation.) Multiple-choice tasks use a separate prompt.
+# Verbatim concatenation of the chat-API prompt used by the vendored
+# `raptor/QAModels.GPT4QAModel.answer_question` — the class that
+# Sarthi et al. 2024 used for the GPT-4 QASPER replication. The
+# vendored class issues a chat-completion with system + user
+# messages; our `AnswererProvider.call` accepts a single prompt
+# string, so we inline the system message at the top.
+#
+# An earlier pilot draft of this file accidentally adopted the
+# legacy `GPT3QAModel` prompt from the same vendored repo (the
+# completion-API path with the "folloing" typo and the "answer in
+# less than 5-7 words" cap). That prompt is for `text-davinci-003`,
+# not GPT-4. The 5-7-word cap was structurally truncating QASPER
+# answers and is the load-bearing reason RAPTOR's apparent F1 sat
+# below Naive RAG on the calibration sweeps. Corrected to the
+# modern chat-API prompt for paper-faithful comparison.
 _RAPTOR_FREEFORM_PROMPT = (
-    "using the folloing information {context}. "
-    "Answer the following question in less than 5-7 words, if possible: "
-    "{question}"
+    "You are Question Answering Portal\n\n"
+    "Given Context: {context} Give the best full answer amongst the option "
+    "to question {question}"
 )
+# The MC prompt has no equivalent in the vendored repo (RAPTOR's
+# paper benchmarks are free-form QA). We mirror the system framing
+# and add the option-letter constraint that NovelQA / QuALITY
+# require for codabench-comparable scoring.
 _RAPTOR_MC_PROMPT = (
-    "using the folloing information {context}. "
+    "You are Question Answering Portal\n\n"
+    "Given Context: {context}\n\n"
     "Answer the following multiple-choice question by responding with the "
     "single option letter (A, B, C, or D) of the correct answer:\n\n"
     "{question}\n\n{options}"

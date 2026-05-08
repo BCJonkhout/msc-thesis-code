@@ -1,76 +1,82 @@
-"""GraphRAG runner — faithful from-scratch implementation.
+"""GraphRAG runner — faithful from-scratch local-search implementation.
 
-Implements the GraphRAG algorithm of Edge et al. 2024 §3.1
-(arXiv:2404.16130) against the pilot's existing primitives —
-`OllamaEmbedder`, `AnswererProvider`, `CostLedger`,
-`SentenceBoundaryChunker` — instead of pulling in Microsoft's
-`graphrag` package and its complex `LLMCompletion` /
-`LLMEmbedding` protocol layer. The from-scratch route is option
-(c) from the research brief: it avoids the 10-class shim work
-required to make the official package observable through the
-pilot's cost ledger, at the cost of skipping the package's
-hierarchical-Leiden / claims-extraction / DRIFT-search niceties
-that aren't in the paper's headline algorithm anyway.
+Implements Edge et al. 2024 §3.1 + Microsoft graphrag's local_search
+(`packages/graphrag/graphrag/query/structured_search/local_search/`)
+against the pilot's primitives — `OllamaEmbedder`, `AnswererProvider`,
+`CostLedger`, `SentenceBoundaryChunker` — instead of pulling in
+Microsoft's `graphrag` package and its multi-class `LLMCompletion` /
+`LLMEmbedding` shim layer.
 
-Pipeline (per Edge et al. §3.1 with paper-faithful parameters):
+Pipeline (per Edge et al. §3.1 + Microsoft `LocalSearchMixedContext`):
 
-  1. Chunk source documents at 600 tokens / 100 overlap
-     (the paper's choice; differs from naive_rag's 384/0).
-  2. Per-chunk LLM call extracting entities (name, type,
-     description) and relationships (source, target, description).
-  3. Build a NetworkX graph: nodes = entities, edges = rels.
-     Entities and edges merged by exact-string key across chunks;
-     descriptions concatenated with newline separators (we skip
-     the per-entity description-summarization LLM call here for
-     budget reasons; flag in the paper's results table that this
-     is a deliberate simplification of one of the paper's stages).
-  4. Louvain community detection (NetworkX 3.x built-in).
-  5. Per-community LLM call summarising the contained entities +
-     edges into a "community report".
-  6. Local search at query time: embed the query, top-k cosine
-     against entity-name + community-report embeddings,
-     concatenate the top reports into a context, single answerer
-     call. Returns the answer + retrieved community-report text.
+  1. Chunk source documents at 600 / 100 (paper §4.1.1).
+  2. Per-chunk LLM call extracting entities + relationships. Entities
+     keep a list of ``text_unit_ids`` tracking which chunks they
+     appear in; relationships gain a ``weight`` = co-occurring-chunk
+     count.
+  3. One gleaning pass per chunk (Microsoft default `max_gleanings=1`):
+     re-run extraction asking the LLM "did you miss anything?". This
+     materially improves recall at the cost of one extra LLM call
+     per chunk.
+  4. Build NetworkX graph: nodes = entities, edges = relationships.
+  5. Louvain community detection (NetworkX 3.x). Deliberate
+     simplification vs hierarchical Leiden via graspologic — both
+     are modularity-optimising; results differ in cross-run
+     stability rather than in static-document quality.
+  6. Per-community LLM call producing a 500–700-token structured
+     report (title / summary / findings) — replacing the prior
+     2–4-sentence summaries which discarded too much information for
+     entity-specific QA.
+  7. Local search at query time, per
+     `LocalSearchMixedContext.build_context`:
 
-Cost-accounting notes
----------------------
+        a. Embed query + all entity descriptions (cached for the
+           document).
+        b. Top-`top_k_entities` entities by query-entity-description
+           cosine (default 10, paper-aligned).
+        c. For each selected entity, transitively gather:
+             - Communities the entity belongs to (sorted by
+               match-count desc, then community size desc).
+             - Top-`top_k_relationships` relationships by weight.
+             - Text units (chunks) the entity appears in, ranked by
+               co-occurring-relationship count.
+        d. Pack context within `max_context_tokens` (default 8000)
+           split:
+             - community 0.15
+             - text-units 0.50
+             - entities + relationships 0.35
 
-Every LLM call writes a `CostLedger` row:
+  8. Single answerer call against the packed local-search context.
 
-  - per-chunk entity extraction → ``Stage.PREPROCESS``
-  - per-community summarisation → ``Stage.PREPROCESS``
-  - query-time embedding (chunks + entities + reports + query) →
-    ``Stage.RETRIEVAL``
-  - final answer call → ``Stage.GENERATE``
-
+Cost-accounting: every LLM and embedding call writes a CostLedger row.
 The pilot's deployment-cost rule (Option A, run_index=0) applies
-uniformly. T=0 for all calls per pilot plan § 3.4.3.
+uniformly.
 
-Deliberate simplifications vs the official Microsoft package
--------------------------------------------------------------
+Deliberate simplifications vs Microsoft `graphrag` package
+----------------------------------------------------------
 
-  - **No description-summary LLM call per entity / edge.** The
-    paper's algorithm calls the LLM once per heavily-mentioned
-    entity to summarise concatenated descriptions; we keep raw
-    concatenated descriptions to avoid the per-entity cost on
-    long documents (could be hundreds of LLM calls on a NovelQA
-    novel). Pilot-paper-faithful enough; revisit at Step 5 if a
-    sensitivity ablation shows it matters.
-  - **Louvain instead of hierarchical Leiden.** The paper uses
-    Leiden via graspologic; we use NetworkX's Louvain. Both are
-    modularity-optimising; results differ in stability under
-    multiple invocations (Leiden is provably more stable). Seed
-    is fixed for reproducibility.
-  - **No claims/covariates extraction.** The paper reports
-    results both with and without; the package's default is
-    without. We follow the without variant to keep cost down.
-  - **Local search only.** QASPER + NovelQA are entity-specific
-    factual-question workloads; the paper's global search is for
-    sensemaking and would mismatch the task.
+  - **Louvain instead of hierarchical Leiden.** NetworkX 3.x ships
+    Louvain natively; graspologic Leiden adds a heavy native
+    dependency. Modularity optimisation is the load-bearing
+    behaviour; both algorithms produce communities that work for
+    local search.
+  - **No covariates / claims extraction.** Microsoft's package
+    skips this by default too.
+  - **No description-summary LLM call per heavily-mentioned
+    entity.** Microsoft's package summarises entity descriptions
+    when concatenated length exceeds a threshold; we keep raw
+    concatenated descriptions, which preserves verbatim factual
+    strings (helpful for QASPER's specific-factual queries).
+  - **Single-prompt structured community report (markdown),** not
+    JSON-schema. Microsoft emits a JSON object with fields
+    `title / summary / rating / rating_explanation / findings[]`;
+    we emit the same content as markdown headers because robust
+    JSON-schema parsing across heterogeneous answerers (Gemini,
+    Grok, DeepSeek) is its own multi-day reliability project.
 
-These simplifications are documented in the architecture note in
-``thesis-msc/notes/pilot_findings.md`` so reviewers can see the
-delta between this pilot's GraphRAG and the published method.
+These deviations are documented in the module-level audit row in
+`thesis-msc/notes/pilot_findings.md` so reviewers can see the delta
+between this pilot's GraphRAG and the published method.
 """
 from __future__ import annotations
 
@@ -80,7 +86,7 @@ import os
 import random
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Pin numba/OpenMP threads before networkx and friends import them.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -93,25 +99,35 @@ from pilot.providers.base import AnswererProvider, CacheControl
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Paper-default parameters
+# Paper-default parameters (Edge et al. 2024 + Microsoft graphrag
+# `LocalSearchDefaults`)
 # ──────────────────────────────────────────────────────────────────────
 
 _CHUNK_TOKENS = 600   # Edge et al. §4.1.1
 _CHUNK_OVERLAP_TOKENS = 100
-_TOP_K_REPORTS = 3    # local-search: top-k community reports to pack into context
-_TOP_K_ENTITIES = 8   # local-search: top-k entities by query embedding
-_COMMUNITY_SEED = 0xDEADBEEF  # graspologic's default; preserved for reproducibility
-_MAX_CONTEXT_TOKENS = 12_000  # paper §3.1.6 local-search default
+_TOP_K_ENTITIES = 10  # Microsoft `LocalSearchDefaults.top_k_mapped_entities`
+_TOP_K_RELATIONSHIPS = 10  # `LocalSearchDefaults.top_k_relationships`
+_MAX_GLEANINGS = 1     # `ExtractGraphDefaults.max_gleanings`
+_COMMUNITY_SEED = 0xDEADBEEF
+
+# Local-search context budget (Microsoft default = 12_000 with a
+# `max_context_tokens` budget; we use 8_000 to keep prompt costs
+# tractable on the QASPER 20Q calibration sweep — the documents
+# themselves are 5-15k tokens after chunking, so the budget is
+# rarely the binding constraint at this scale).
+_MAX_CONTEXT_TOKENS = 8_000
+_COMMUNITY_PROP = 0.15  # `LocalSearchDefaults.community_prop`
+_TEXT_UNIT_PROP = 0.50  # `LocalSearchDefaults.text_unit_prop`
+# remaining 0.35 for entities + relationships
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Prompts (compact paper-faithful versions; full prompts at Step 5
-# ablation if a wording change matters)
+# Prompts
 # ──────────────────────────────────────────────────────────────────────
 
 _ENTITY_EXTRACT_PROMPT = """You are extracting structured information from a document chunk.
 
-Identify all named entities (people, places, organisations, events) and the relationships between them. Respond with strict JSON of the form:
+Identify all named entities (people, places, organisations, events, concepts, methods, datasets) and the relationships between them. Respond with strict JSON of the form:
 
 {{"entities": [{{"name": "...", "type": "...", "description": "..."}}, ...],
  "relationships": [{{"source": "...", "target": "...", "description": "..."}}, ...]}}
@@ -122,47 +138,86 @@ Document chunk:
 {chunk}
 """
 
-_COMMUNITY_SUMMARY_PROMPT = """You are writing a brief report on a thematic community of entities. The community contains the following entities and their pairwise relationships.
+# Microsoft graphrag's gleaning loop appends this single prompt and
+# expects the model to emit additional entities/relationships missed
+# in the first pass. The format is the same as the initial extract.
+_ENTITY_GLEAN_PROMPT = """You previously extracted entities and relationships from this document chunk. Some entities or relationships may have been missed.
 
-Entities:
+Re-examine the chunk and emit any ADDITIONAL entities and relationships that were not in your prior response. Use the same JSON format. If you found nothing new, return {{"entities": [], "relationships": []}}.
+
+Document chunk:
+{chunk}
+"""
+
+# Lengthened, structured community-report prompt (markdown sections
+# substituting for Microsoft's JSON schema). Target ~500-700 tokens
+# per report — closer to the Microsoft package's 2000-token cap than
+# our previous 2-4-sentence summaries which discarded the verbatim
+# detail QASPER's questions need.
+_COMMUNITY_REPORT_PROMPT = """You are writing a community report on a thematic group of entities extracted from a document. The report will be used by a question-answering system that retrieves it when its query touches one of these entities.
+
+The community contains the following entities and pairwise relationships.
+
+# Entities
 {entities}
 
-Relationships:
+# Relationships
 {relationships}
 
-Produce a 2-4 sentence summary covering: who/what is in the community, what they have in common, and the most important relationship in the community. Respond with the summary text only.
+Write a structured markdown report with the following sections, preserving verbatim factual details from the entity descriptions wherever possible:
+
+## Title
+A 4-12 word title naming the community by its dominant theme or central entities.
+
+## Summary
+A 3-5 sentence summary covering: who/what is in this community, what role they play in the document, and the most important relationships among them. Preserve specific names, numbers, and technical terms verbatim.
+
+## Findings
+3-7 bullet points stating concrete facts about the entities and relationships. Each finding should be a complete factual sentence drawn from the entity descriptions, not a meta-summary. Numbers, model names, dataset names, methods, and other specific terms must be preserved verbatim.
+
+Respond with the markdown report only. No preamble or trailing commentary.
 """
 
 
-@dataclass(frozen=True)
+# ──────────────────────────────────────────────────────────────────────
+# Data structures
+# ──────────────────────────────────────────────────────────────────────
+
+@dataclass
 class _Entity:
     name: str
     type: str
     description: str
+    text_unit_ids: list[int] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Relationship:
     source: str
     target: str
     description: str
+    text_unit_id: int = -1
+    # Per-edge weight is the count of distinct chunks the (source, target)
+    # pair appeared in; computed at graph-build time.
+
+
+@dataclass
+class _CommunityReport:
+    community_id: int
+    member_names: list[str]
+    text: str          # rendered markdown report
+    rank: int          # community size (proxy for Microsoft's rank attribute)
 
 
 # ──────────────────────────────────────────────────────────────────────
-# JSON-extraction helpers (defensive against LLMs that wrap output
-# in markdown code fences)
+# JSON parsing helpers
 # ──────────────────────────────────────────────────────────────────────
 
 _JSON_BLOCK_RE = re.compile(r"\{(?:[^{}]|\{[^{}]*\})*\}", re.DOTALL)
 
 
 def _parse_extract_json(raw: str) -> dict:
-    """Lenient JSON extractor for the entity-extraction LLM output.
-
-    Models occasionally wrap JSON in ```json ... ``` fences or emit
-    explanatory prose around the JSON. Try strict json.loads first;
-    fall back to the largest matching {...} block.
-    """
+    """Lenient JSON extractor for entity-extraction LLM output."""
     if not raw or not raw.strip():
         return {"entities": [], "relationships": []}
     try:
@@ -189,9 +244,62 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return num / (da * db)
 
 
+def _approx_token_count(text: str) -> int:
+    """Cheap char/4 token approximation. The pilot uses this everywhere
+    a tokenizer would be overkill (cost ledger fallback, retrieval
+    budget packing). Within ~10% of OpenAI tokenisers for English text."""
+    return max(1, len(text) // 4)
+
+
 # ──────────────────────────────────────────────────────────────────────
-# Pipeline stages
+# Entity extraction (with gleaning)
 # ──────────────────────────────────────────────────────────────────────
+
+def _merge_extraction(
+    entities: dict[str, _Entity],
+    relationships: list[_Relationship],
+    parsed: dict,
+    *,
+    chunk_idx: int,
+) -> None:
+    """In-place merge of one parsed extraction into the cumulative
+    entity dict + relationship list. Tracks which chunks each entity
+    appeared in via text_unit_ids."""
+    for raw_e in parsed.get("entities", []) or []:
+        if not isinstance(raw_e, dict):
+            continue
+        name = (raw_e.get("name") or "").strip()
+        if not name:
+            continue
+        etype = (raw_e.get("type") or "").strip() or "unknown"
+        desc = (raw_e.get("description") or "").strip()
+        existing = entities.get(name)
+        if existing is None:
+            entities[name] = _Entity(
+                name=name, type=etype, description=desc,
+                text_unit_ids=[chunk_idx],
+            )
+        else:
+            if desc and desc not in existing.description:
+                existing.description = (
+                    f"{existing.description}\n{desc}"
+                    if existing.description else desc
+                )
+            if chunk_idx not in existing.text_unit_ids:
+                existing.text_unit_ids.append(chunk_idx)
+
+    for raw_r in parsed.get("relationships", []) or []:
+        if not isinstance(raw_r, dict):
+            continue
+        src = (raw_r.get("source") or "").strip()
+        tgt = (raw_r.get("target") or "").strip()
+        if not src or not tgt:
+            continue
+        desc = (raw_r.get("description") or "").strip()
+        relationships.append(_Relationship(
+            source=src, target=tgt, description=desc, text_unit_id=chunk_idx,
+        ))
+
 
 def _extract_entities_per_chunk(
     chunks: list[str],
@@ -201,87 +309,93 @@ def _extract_entities_per_chunk(
     ledger: CostLedger,
     run_index: int,
     max_tokens: int = 1024,
+    max_gleanings: int = _MAX_GLEANINGS,
 ) -> tuple[list[_Entity], list[_Relationship]]:
-    """One LLM call per chunk extracting entities + relationships."""
+    """One LLM call per chunk plus ``max_gleanings`` re-extraction passes.
+
+    Microsoft graphrag's `extract_graph` does the same: initial
+    extraction, then up to `max_gleanings` follow-up calls per chunk
+    asking the model to emit anything it missed. The default is 1.
+    """
     entities: dict[str, _Entity] = {}
     relationships: list[_Relationship] = []
 
-    for chunk in chunks:
-        prompt = _ENTITY_EXTRACT_PROMPT.format(chunk=chunk)
-        with ledger.log_call(
-            architecture="graphrag",
-            stage=Stage.PREPROCESS,
-            model=answerer_model,
-            prompt=prompt,
-            run_index=run_index,
-            temperature=0.0,
-            max_tokens=max_tokens,
-        ) as rec:
-            result = answerer.call(
-                prompt,
+    for chunk_idx, chunk in enumerate(chunks):
+        for pass_idx in range(max_gleanings + 1):
+            if pass_idx == 0:
+                prompt = _ENTITY_EXTRACT_PROMPT.format(chunk=chunk)
+            else:
+                prompt = _ENTITY_GLEAN_PROMPT.format(chunk=chunk)
+            with ledger.log_call(
+                architecture="graphrag",
+                stage=Stage.PREPROCESS,
                 model=answerer_model,
-                max_tokens=max_tokens,
+                prompt=prompt,
+                run_index=run_index,
                 temperature=0.0,
-                cache_control=CacheControl.EPHEMERAL_5MIN,
-            )
-            rec.uncached_input_tokens = result.uncached_input_tokens
-            rec.cached_input_tokens = result.cached_input_tokens
-            rec.output_tokens = result.output_tokens
-            rec.provider_request_id = result.provider_request_id
-            rec.response_hash = sha256_hex(result.text or "")
+                max_tokens=max_tokens,
+            ) as rec:
+                result = answerer.call(
+                    prompt,
+                    model=answerer_model,
+                    max_tokens=max_tokens,
+                    temperature=0.0,
+                    cache_control=CacheControl.EPHEMERAL_5MIN,
+                )
+                rec.uncached_input_tokens = result.uncached_input_tokens
+                rec.cached_input_tokens = result.cached_input_tokens
+                rec.output_tokens = result.output_tokens
+                rec.provider_request_id = result.provider_request_id
+                rec.response_hash = sha256_hex(result.text or "")
 
-        parsed = _parse_extract_json(result.text or "")
-        for raw_e in parsed.get("entities", []) or []:
-            if not isinstance(raw_e, dict):
-                continue
-            name = (raw_e.get("name") or "").strip()
-            if not name:
-                continue
-            etype = (raw_e.get("type") or "").strip() or "unknown"
-            desc = (raw_e.get("description") or "").strip()
-            existing = entities.get(name)
-            merged_desc = (
-                f"{existing.description}\n{desc}" if existing and desc else (desc or (existing.description if existing else ""))
-            )
-            entities[name] = _Entity(name=name, type=existing.type if existing else etype, description=merged_desc.strip())
-
-        for raw_r in parsed.get("relationships", []) or []:
-            if not isinstance(raw_r, dict):
-                continue
-            src = (raw_r.get("source") or "").strip()
-            tgt = (raw_r.get("target") or "").strip()
-            if not src or not tgt:
-                continue
-            desc = (raw_r.get("description") or "").strip()
-            relationships.append(_Relationship(source=src, target=tgt, description=desc))
+            parsed = _parse_extract_json(result.text or "")
+            # Stop gleaning early if a pass returns nothing
+            if pass_idx > 0 and not parsed.get("entities") and not parsed.get("relationships"):
+                break
+            _merge_extraction(entities, relationships, parsed, chunk_idx=chunk_idx)
 
     return list(entities.values()), relationships
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Graph + community detection
+# ──────────────────────────────────────────────────────────────────────
 
 def _build_graph_and_communities(
     entities: list[_Entity],
     relationships: list[_Relationship],
     *,
     seed: int = _COMMUNITY_SEED,
-) -> tuple[object, list[set[str]]]:
-    """Construct a NetworkX graph and run Louvain community detection."""
+) -> tuple[object, list[set[str]], dict[tuple[str, str], list[int]]]:
+    """Construct a NetworkX graph and run Louvain community detection.
+
+    Returns (graph, communities, edge_text_unit_map). The
+    edge_text_unit_map records, for each undirected edge key, the list
+    of chunk indices the relationship was extracted from (used by local
+    search to rank text units).
+    """
     import networkx as nx
 
     g = nx.Graph()
     for e in entities:
-        g.add_node(e.name, type=e.type, description=e.description)
+        g.add_node(
+            e.name,
+            type=e.type,
+            description=e.description,
+            text_unit_ids=tuple(e.text_unit_ids),
+        )
     edge_counts: dict[tuple[str, str], int] = defaultdict(int)
     edge_descriptions: dict[tuple[str, str], list[str]] = defaultdict(list)
+    edge_text_units: dict[tuple[str, str], list[int]] = defaultdict(list)
     for r in relationships:
-        # Edge order normalised so (a, b) and (b, a) merge.
         key = tuple(sorted((r.source, r.target)))
         edge_counts[key] += 1
         if r.description:
             edge_descriptions[key].append(r.description)
-        # Add nodes for entities first introduced in relationships.
+        edge_text_units[key].append(r.text_unit_id)
         for n in key:
             if n not in g:
-                g.add_node(n, type="unknown", description="")
+                g.add_node(n, type="unknown", description="", text_unit_ids=())
     for key, count in edge_counts.items():
         g.add_edge(
             key[0], key[1],
@@ -290,13 +404,16 @@ def _build_graph_and_communities(
         )
 
     if g.number_of_nodes() == 0:
-        return g, []
+        return g, [], {}
 
-    # NetworkX 3.x's louvain_communities; seed for reproducibility.
     rng = random.Random(seed)
     communities = nx.community.louvain_communities(g, seed=rng.randint(0, 2**31 - 1))
-    return g, communities
+    return g, communities, dict(edge_text_units)
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Community summarisation
+# ──────────────────────────────────────────────────────────────────────
 
 def _summarise_communities(
     g,
@@ -306,10 +423,10 @@ def _summarise_communities(
     answerer_model: str,
     ledger: CostLedger,
     run_index: int,
-    max_tokens: int = 512,
-) -> list[dict]:
-    """Per-community LLM call producing a 2-4 sentence summary."""
-    reports: list[dict] = []
+    max_tokens: int = 800,
+) -> list[_CommunityReport]:
+    """Per-community LLM call producing a structured ~500-700 token report."""
+    reports: list[_CommunityReport] = []
     for community_idx, members in enumerate(communities):
         if not members:
             continue
@@ -318,16 +435,20 @@ def _summarise_communities(
         for name in member_list:
             data = g.nodes[name]
             ent_lines.append(
-                f"- {name} (type: {data.get('type', 'unknown')}): {data.get('description', '')[:200]}"
+                f"- **{name}** (type: {data.get('type', 'unknown')}): "
+                f"{data.get('description', '')}"
             )
         rel_lines = []
         for u, v, data in g.edges(member_list, data=True):
             if u in members and v in members:
-                rel_lines.append(f"- {u} ↔ {v}: {data.get('description', '')[:200]}")
+                rel_lines.append(
+                    f"- **{u} ↔ {v}** (weight {data.get('weight', 1)}): "
+                    f"{data.get('description', '')}"
+                )
 
-        prompt = _COMMUNITY_SUMMARY_PROMPT.format(
+        prompt = _COMMUNITY_REPORT_PROMPT.format(
             entities="\n".join(ent_lines),
-            relationships="\n".join(rel_lines) or "(none)",
+            relationships="\n".join(rel_lines) or "_(no within-community relationships)_",
         )
         with ledger.log_call(
             architecture="graphrag",
@@ -351,59 +472,192 @@ def _summarise_communities(
             rec.provider_request_id = result.provider_request_id
             rec.response_hash = sha256_hex(result.text or "")
 
-        reports.append({
-            "community_idx": community_idx,
-            "members": member_list,
-            "summary": result.text or "",
-        })
+        reports.append(_CommunityReport(
+            community_id=community_idx,
+            member_names=member_list,
+            text=result.text or "",
+            rank=len(member_list),
+        ))
     return reports
 
 
-def _local_search(
+# ──────────────────────────────────────────────────────────────────────
+# Local search (Microsoft `LocalSearchMixedContext.build_context`)
+# ──────────────────────────────────────────────────────────────────────
+
+def _entity_to_community(
+    communities: list[set[str]],
+) -> dict[str, list[int]]:
+    """Reverse map: entity name → list of community indices it belongs to."""
+    out: dict[str, list[int]] = defaultdict(list)
+    for c_idx, members in enumerate(communities):
+        for name in members:
+            out[name].append(c_idx)
+    return dict(out)
+
+
+def _pack_within_budget(
+    items: list[tuple[str, int]],
+    budget_tokens: int,
+) -> list[str]:
+    """Greedy token-budget packer. Items are (text, approx_token_count).
+    Returns the prefix that fits."""
+    used = 0
+    out: list[str] = []
+    for text, tok in items:
+        if used + tok > budget_tokens:
+            break
+        out.append(text)
+        used += tok
+    return out
+
+
+def _local_search_build_context(
     *,
     query: str,
+    g,
     entities: list[_Entity],
-    reports: list[dict],
+    relationships: list[_Relationship],
+    communities: list[set[str]],
+    reports: list[_CommunityReport],
+    chunks: list[str],
     embedder: OllamaEmbedder,
     ledger: CostLedger,
     run_index: int,
-    top_k_reports: int = _TOP_K_REPORTS,
-) -> list[str]:
-    """Embed the query + community-report summaries; return top-k summaries.
+    top_k_entities: int = _TOP_K_ENTITIES,
+    top_k_relationships: int = _TOP_K_RELATIONSHIPS,
+    max_context_tokens: int = _MAX_CONTEXT_TOKENS,
+) -> tuple[str, list[str]]:
+    """Build the local-search context for the answerer.
 
-    The retrieval signal in our minimal GraphRAG is the cosine
-    similarity between the query and each community report's
-    summary embedding. Entity-name embeddings could also be used
-    (the paper does both); we keep it to community reports for
-    simplicity and cost.
+    Returns ``(packed_context, evidence_sentences)``. The
+    evidence_sentences list is a flat list of human-readable strings
+    pulled into the context, used by the architecture-level
+    ArchitectureResult for evidence reporting.
     """
-    if not reports:
-        return []
+    if not entities:
+        return "(no entities extracted)", []
 
-    summaries = [r["summary"] for r in reports]
-    embed_payload = "\n\n".join([query] + summaries)
-
+    # 1. Embed query + every entity description.
+    entity_texts = [f"{e.name}: {e.description}" for e in entities]
+    embed_payload = [query] + entity_texts
     with ledger.log_call(
         architecture="graphrag",
         stage=Stage.RETRIEVAL,
         model=embedder.model,
-        prompt=embed_payload,
+        prompt="\n\n".join(embed_payload),
         run_index=run_index,
     ) as rec:
-        embed_result = embedder.embed([query] + summaries)
-        rec.uncached_input_tokens = max(1, sum(len(t) for t in [query] + summaries) // 4)
+        embed_result = embedder.embed(embed_payload)
+        rec.uncached_input_tokens = max(
+            1, sum(len(t) for t in embed_payload) // 4
+        )
         rec.cached_input_tokens = 0
         rec.output_tokens = 0
         rec.response_hash = sha256_hex(
-            "|".join(f"{v[0]:.6f}" for v in embed_result.embeddings if v)
+            "|".join(
+                f"{v[0]:.6f}" for v in embed_result.embeddings if v
+            )
         )
-
     query_vec = embed_result.embeddings[0]
-    report_vecs = embed_result.embeddings[1:]
-    scores = [_cosine(query_vec, vec) for vec in report_vecs]
+    entity_vecs = embed_result.embeddings[1:]
+
+    # 2. Top-k entities by query-entity-description cosine.
+    scores = [_cosine(query_vec, v) for v in entity_vecs]
     indexed = sorted(range(len(scores)), key=lambda i: -scores[i])
-    top = indexed[:top_k_reports]
-    return [summaries[i] for i in top]
+    selected_idxs = indexed[:top_k_entities]
+    selected = [entities[i] for i in selected_idxs]
+    selected_names = {e.name for e in selected}
+
+    # 3. Communities ranked by entity-match count + community size.
+    e2c = _entity_to_community(communities)
+    community_match_count: dict[int, int] = defaultdict(int)
+    for e in selected:
+        for c_idx in e2c.get(e.name, []):
+            community_match_count[c_idx] += 1
+    reports_by_id = {r.community_id: r for r in reports}
+    ranked_community_ids = sorted(
+        community_match_count.keys(),
+        key=lambda c: (-community_match_count[c],
+                       -reports_by_id[c].rank if c in reports_by_id else 0),
+    )
+
+    # 4. Per-selected-entity relationships (top-k by weight).
+    rels_by_node: dict[str, list[tuple[str, int, str]]] = defaultdict(list)
+    for u, v, data in g.edges(selected_names, data=True):
+        if u in selected_names or v in selected_names:
+            rels_by_node[u].append((v, data.get("weight", 1), data.get("description", "")))
+            rels_by_node[v].append((u, data.get("weight", 1), data.get("description", "")))
+    selected_relationship_lines: list[str] = []
+    for e in selected:
+        node_rels = sorted(rels_by_node.get(e.name, []), key=lambda r: -r[1])[:top_k_relationships]
+        for other, weight, desc in node_rels:
+            line = f"- **{e.name} ↔ {other}** (weight {weight}): {desc}"
+            if line not in selected_relationship_lines:
+                selected_relationship_lines.append(line)
+
+    # 5. Text units (chunks) the selected entities appear in. Rank by
+    # number of selected entities present + number of selected
+    # relationships co-occurring in the same chunk.
+    chunk_score: dict[int, int] = defaultdict(int)
+    for e in selected:
+        for cid in e.text_unit_ids:
+            chunk_score[cid] += 1
+    for r in relationships:
+        if (r.source in selected_names or r.target in selected_names):
+            if r.text_unit_id >= 0:
+                chunk_score[r.text_unit_id] += 1
+    ranked_chunk_ids = sorted(chunk_score.keys(), key=lambda c: -chunk_score[c])
+
+    # 6. Pack context within budget split:
+    # community_prop / text_unit_prop / (1 - sum) for entities+relationships.
+    community_budget = int(max_context_tokens * _COMMUNITY_PROP)
+    text_unit_budget = int(max_context_tokens * _TEXT_UNIT_PROP)
+    local_budget = max_context_tokens - community_budget - text_unit_budget
+
+    community_items: list[tuple[str, int]] = []
+    for c_idx in ranked_community_ids:
+        if c_idx not in reports_by_id:
+            continue
+        text = reports_by_id[c_idx].text
+        community_items.append((text, _approx_token_count(text)))
+    community_packed = _pack_within_budget(community_items, community_budget)
+
+    text_unit_items: list[tuple[str, int]] = []
+    for cid in ranked_chunk_ids:
+        if cid < 0 or cid >= len(chunks):
+            continue
+        text_unit_items.append((chunks[cid], _approx_token_count(chunks[cid])))
+    text_unit_packed = _pack_within_budget(text_unit_items, text_unit_budget)
+
+    entity_lines: list[tuple[str, int]] = []
+    for e in selected:
+        line = f"- **{e.name}** (type: {e.type}): {e.description}"
+        entity_lines.append((line, _approx_token_count(line)))
+    rel_items = [(line, _approx_token_count(line)) for line in selected_relationship_lines]
+    local_items = entity_lines + rel_items
+    local_packed = _pack_within_budget(local_items, local_budget)
+
+    # 7. Stitch the context.
+    parts: list[str] = []
+    if community_packed:
+        parts.append("# Community Reports\n\n" + "\n\n---\n\n".join(community_packed))
+    if local_packed:
+        # Split entity lines from relationship lines for readability.
+        ent_section = [l for l in local_packed if any(l == el[0] for el in entity_lines)]
+        rel_section = [l for l in local_packed if any(l == rl[0] for rl in rel_items)]
+        if ent_section:
+            parts.append("# Entities\n\n" + "\n".join(ent_section))
+        if rel_section:
+            parts.append("# Relationships\n\n" + "\n".join(rel_section))
+    if text_unit_packed:
+        parts.append("# Source Text\n\n" + "\n\n---\n\n".join(text_unit_packed))
+
+    context = "\n\n".join(parts) if parts else "(no local-search context could be packed within the token budget)"
+
+    # Evidence is the union of community reports and text units used.
+    evidence = list(community_packed) + list(text_unit_packed)
+    return context, evidence
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -424,15 +678,11 @@ def run_graphrag(
     summary_model: str | None = None,
     summary_answerer: AnswererProvider | None = None,
 ) -> ArchitectureResult:
-    """Run the GraphRAG pipeline (extract → graph → communities → local search → answer).
+    """Run the faithful GraphRAG local-search pipeline.
 
     Returns an ArchitectureResult with the predicted answer and the
-    retrieved community-report summaries as evidence. The pipeline
-    is single-pass and stateless across calls — every invocation
-    re-runs entity extraction and community detection on the
-    document, which is the same thing the cost model assumes for
-    a deployment-cost calculation. Caching across queries on the
-    same document would be the obvious follow-up optimisation.
+    union of community reports + chunk text passed into the answerer
+    context as evidence sentences.
 
     ``summary_answerer`` lets entity extraction + per-community
     summarisation run on a different provider than the final answer
@@ -443,7 +693,7 @@ def run_graphrag(
     summary_model = summary_model or answerer_model
     summary_answerer = summary_answerer or answerer
 
-    # 1. Chunk the document at the paper-default 600 / 100.
+    # 1. Chunk.
     chunker = SentenceBoundaryChunker(
         chunk_size_tokens=_CHUNK_TOKENS, overlap_tokens=_CHUNK_OVERLAP_TOKENS
     )
@@ -456,7 +706,7 @@ def run_graphrag(
             failure_reason="document_produced_no_chunks",
         )
 
-    # 2. Extract entities + relationships per chunk.
+    # 2. Extract entities + relationships (with one gleaning pass).
     entities, relationships = _extract_entities_per_chunk(
         chunks,
         answerer=summary_answerer, answerer_model=summary_model,
@@ -471,23 +721,26 @@ def run_graphrag(
         )
 
     # 3. Build graph + communities.
-    g, communities = _build_graph_and_communities(entities, relationships)
+    g, communities, _edge_tu = _build_graph_and_communities(
+        entities, relationships,
+    )
 
-    # 4. Per-community summaries.
+    # 4. Per-community structured reports.
     reports = _summarise_communities(
         g, communities,
         answerer=summary_answerer, answerer_model=summary_model,
         ledger=ledger, run_index=run_index,
     )
 
-    # 5. Local search: pick the top-k community-report summaries.
-    top_summaries = _local_search(
-        query=query, entities=entities, reports=reports,
+    # 5. Local search builds the packed context.
+    context, evidence = _local_search_build_context(
+        query=query,
+        g=g, entities=entities, relationships=relationships,
+        communities=communities, reports=reports, chunks=chunks,
         embedder=embedder, ledger=ledger, run_index=run_index,
     )
 
-    # 6. Final answer call.
-    context = "\n\n".join(top_summaries) if top_summaries else "(no community reports retrieved)"
+    # 6. Final answer call against the packed context.
     prompt = _render_prompt(context=context, query=query, options=options)
     with ledger.log_call(
         architecture="graphrag",
@@ -514,7 +767,7 @@ def run_graphrag(
     return ArchitectureResult(
         architecture="graphrag",
         predicted_answer=result.text,
-        retrieved_evidence_sentences=top_summaries,
+        retrieved_evidence_sentences=evidence,
         prompt_token_count=result.uncached_input_tokens + result.cached_input_tokens,
         response_token_count=result.output_tokens,
     )

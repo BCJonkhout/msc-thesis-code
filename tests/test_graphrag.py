@@ -1,19 +1,22 @@
-"""Tests for the from-scratch GraphRAG runner.
+"""Tests for the faithful from-scratch GraphRAG local-search runner.
 
-Coverage targets:
+The runner implements Edge et al. 2024 §3.1 + Microsoft graphrag's
+`LocalSearchMixedContext.build_context`. Coverage targets:
 
   - Pipeline-stage helpers (`_parse_extract_json`,
-    `_build_graph_and_communities`) are deterministic and behave
-    as documented.
-  - End-to-end `run_graphrag` with a mocked answerer and embedder
-    writes the expected number of ledger rows tagged with the
-    right (architecture, stage) pairs:
-       * one PREPROCESS per chunk (entity extraction)
-       * one PREPROCESS per community (community summary)
-       * one RETRIEVAL (the local-search query embed)
-       * one GENERATE (the final answer call)
-  - Graceful failure on empty / no-entity inputs (no ledger
-    rows from skipped stages, ArchitectureResult.failed=True).
+    `_build_graph_and_communities`, `_pack_within_budget`) are
+    deterministic and behave as documented.
+  - Entity extraction tracks `text_unit_ids` per entity so local
+    search can recover chunk provenance.
+  - End-to-end `run_graphrag` with mocked providers writes the
+    expected ledger-row pattern:
+       * (max_gleanings + 1) PREPROCESS rows per chunk for extraction
+       * one PREPROCESS per community for the structured report
+       * one RETRIEVAL for the local-search query+entity embed
+       * one GENERATE for the final answer call
+  - Graceful failure on empty / no-entity inputs.
+  - Local-search context-builder packs community reports + chunk
+    text + entity/relationship lines within the token budget.
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ from pilot.architectures.graphrag import (
     _Entity,
     _Relationship,
     _build_graph_and_communities,
+    _pack_within_budget,
     _parse_extract_json,
     run_graphrag,
 )
@@ -143,52 +147,84 @@ class TestParseExtractJson:
 
 class TestBuildGraphAndCommunities:
     def test_empty_inputs_return_empty_graph(self):
-        g, communities = _build_graph_and_communities([], [])
+        g, communities, edge_tu = _build_graph_and_communities([], [])
         assert g.number_of_nodes() == 0
         assert communities == []
+        assert edge_tu == {}
 
-    def test_nodes_carry_type_and_description(self):
+    def test_nodes_carry_type_description_and_text_unit_ids(self):
         ents = [
-            _Entity(name="Alice", type="person", description="A protagonist."),
-            _Entity(name="London", type="place", description="A city."),
+            _Entity(name="Alice", type="person", description="A protagonist.",
+                    text_unit_ids=[0, 2]),
+            _Entity(name="London", type="place", description="A city.",
+                    text_unit_ids=[2]),
         ]
-        rels = [_Relationship(source="Alice", target="London", description="lives in")]
-        g, _ = _build_graph_and_communities(ents, rels)
+        rels = [_Relationship(source="Alice", target="London",
+                              description="lives in", text_unit_id=2)]
+        g, _, edge_tu = _build_graph_and_communities(ents, rels)
         assert g.number_of_nodes() == 2
         assert g.nodes["Alice"]["type"] == "person"
         assert g.nodes["Alice"]["description"] == "A protagonist."
+        assert g.nodes["Alice"]["text_unit_ids"] == (0, 2)
         assert g.nodes["London"]["type"] == "place"
+        # edge_text_unit_map records the chunk(s) the relationship was
+        # extracted from
+        assert edge_tu[("Alice", "London")] == [2]
 
     def test_edge_weights_count_co_occurrences(self):
-        # The paper defines edge weight as the number of duplicate
-        # relationship instances detected. Three (Alice, London)
-        # triples should produce one edge with weight=3.
+        # Three (Alice, London) relationships from chunks 0, 1, 2 should
+        # produce one undirected edge with weight=3 and edge_text_units
+        # tracking [0, 1, 2].
         ents = [_Entity(name=n, type="x", description="") for n in ("Alice", "London")]
         rels = [
-            _Relationship(source="Alice", target="London", description="r1"),
-            _Relationship(source="Alice", target="London", description="r2"),
-            _Relationship(source="London", target="Alice", description="r3"),  # reverse order normalises
+            _Relationship(source="Alice", target="London", description="r1", text_unit_id=0),
+            _Relationship(source="Alice", target="London", description="r2", text_unit_id=1),
+            _Relationship(source="London", target="Alice", description="r3", text_unit_id=2),
         ]
-        g, _ = _build_graph_and_communities(ents, rels)
+        g, _, edge_tu = _build_graph_and_communities(ents, rels)
         assert g.number_of_edges() == 1
         edge = g.edges["Alice", "London"]
         assert edge["weight"] == 3
-        assert "r1" in edge["description"] and "r2" in edge["description"] and "r3" in edge["description"]
+        assert "r1" in edge["description"]
+        assert "r2" in edge["description"]
+        assert "r3" in edge["description"]
+        assert sorted(edge_tu[("Alice", "London")]) == [0, 1, 2]
 
     def test_louvain_seed_is_deterministic(self):
-        # Same inputs + same seed → identical communities across runs.
         ents = [_Entity(name=str(i), type="x", description="") for i in range(20)]
         rels = []
-        # Add a clique on each half to force two communities.
         for i in range(10):
             for j in range(i + 1, 10):
                 rels.append(_Relationship(source=str(i), target=str(j), description=""))
         for i in range(10, 20):
             for j in range(i + 1, 20):
                 rels.append(_Relationship(source=str(i), target=str(j), description=""))
-        a_g, a_communities = _build_graph_and_communities(ents, rels, seed=42)
-        b_g, b_communities = _build_graph_and_communities(ents, rels, seed=42)
+        _ag, a_communities, _ = _build_graph_and_communities(ents, rels, seed=42)
+        _bg, b_communities, _ = _build_graph_and_communities(ents, rels, seed=42)
         assert [sorted(c) for c in a_communities] == [sorted(c) for c in b_communities]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# _pack_within_budget — the local-search context-builder helper
+# ──────────────────────────────────────────────────────────────────────
+
+class TestPackWithinBudget:
+    def test_packs_until_budget_hit(self):
+        items = [("a" * 40, 10), ("b" * 80, 20), ("c" * 40, 10)]
+        # budget 25 → only the first item (10 tok) + second (20 tok) = 30
+        # exceeds; only first fits
+        out = _pack_within_budget(items, 25)
+        assert out == ["a" * 40]
+
+    def test_takes_full_list_when_budget_exceeds_total(self):
+        items = [("x", 5), ("y", 5)]
+        out = _pack_within_budget(items, 100)
+        assert out == ["x", "y"]
+
+    def test_returns_empty_list_when_first_item_exceeds_budget(self):
+        items = [("huge", 1000)]
+        out = _pack_within_budget(items, 50)
+        assert out == []
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -196,15 +232,15 @@ class TestBuildGraphAndCommunities:
 # ──────────────────────────────────────────────────────────────────────
 
 class TestRunGraphragEndToEnd:
+    """End-to-end smoke. Each chunk goes through 1 initial extraction
+    + 1 gleaning pass (Microsoft default `max_gleanings=1`); the
+    gleaning pass that returns empty is recorded but does not re-merge.
+    """
+
     def test_one_chunk_one_entity_writes_expected_ledger_rows(self, tmp_path: Path):
-        """Smallest sensible input: a tiny document → 1 chunk → 1
-        entity-extraction call → 1 community → 1 community-summary
-        call → 1 query embed → 1 final answer call.
-        """
-        # Document short enough to fit in one 600-token chunk. ~20 words.
         document = "Alice met Bob in London. They had a long conversation about philosophy and art."
-        # Scripted answers: extraction, community summary, final answer.
         answerer = _ScriptedAnswerer([
+            # Chunk 1 — initial extraction
             json.dumps({
                 "entities": [
                     {"name": "Alice", "type": "person", "description": "First protagonist."},
@@ -216,8 +252,12 @@ class TestRunGraphragEndToEnd:
                     {"source": "Alice", "target": "London", "description": "in"},
                 ],
             }),
-            "A community of two people meeting in a city.",  # community summary
-            "Alice and Bob met in London.",  # final answer
+            # Chunk 1 — gleaning pass returns empty (early-exits the loop)
+            json.dumps({"entities": [], "relationships": []}),
+            # Community report (1 community for this graph)
+            "## Title\nMeeting in London\n\n## Summary\nA short community.\n\n## Findings\n- Alice and Bob met in London.",
+            # Final answer
+            "Alice and Bob met in London.",
         ])
         embedder = _StubEmbedder()
         ledger = CostLedger(run_id="test-graphrag-1", root=tmp_path)
@@ -237,17 +277,16 @@ class TestRunGraphragEndToEnd:
         assert result.predicted_answer == "Alice and Bob met in London."
 
         rows = ledger.read()
-        # One PREPROCESS per chunk (1) + one per community (>=1) + one RETRIEVAL + one GENERATE.
         stages = [r.stage for r in rows]
+        # 1 retrieval (local-search query+entity embed) + 1 generate (final).
         assert stages.count("retrieval") == 1
         assert stages.count("generate") == 1
-        # At least one PREPROCESS for entity extraction. Community summary
-        # depends on Louvain partition; for 3 nodes + 2 edges it's typically 1.
-        assert stages.count("preprocess") >= 2
+        # >=2 PREPROCESS for extraction (1 initial + 1 glean) + >=1 community.
+        assert stages.count("preprocess") >= 3
         assert all(r.architecture == "graphrag" for r in rows)
-        # The final-answer prompt is what the answerer last received.
+        # Final-answer prompt should reference the query.
         final_prompt = answerer.calls[-1]["prompt"]
-        assert "Alice and Bob meet" in final_prompt or "Where did Alice" in final_prompt
+        assert "Where did Alice" in final_prompt or "Alice and Bob meet" in final_prompt
 
     def test_empty_document_fails_gracefully(self, tmp_path: Path):
         answerer = _ScriptedAnswerer(["{}"])
@@ -260,14 +299,15 @@ class TestRunGraphragEndToEnd:
         )
         assert result.failed is True
         assert result.failure_reason == "document_produced_no_chunks"
-        # No ledger rows; no answerer calls.
         assert ledger.read() == []
         assert answerer.calls == []
 
     def test_no_entities_extracted_fails_gracefully(self, tmp_path: Path):
-        # A document with one chunk but the LLM returns no entities.
-        document = "x " * 200  # forces at least one chunk
+        # One-chunk document. Initial extraction returns empty; gleaning
+        # pass also empty → entities dict stays empty → fail.
+        document = "x " * 200
         answerer = _ScriptedAnswerer([
+            json.dumps({"entities": [], "relationships": []}),
             json.dumps({"entities": [], "relationships": []}),
         ])
         embedder = _StubEmbedder()
@@ -279,14 +319,17 @@ class TestRunGraphragEndToEnd:
         )
         assert result.failed is True
         assert result.failure_reason == "no_entities_extracted"
-        # The extraction call was made but no community / final / embed call.
+        # Both extraction calls are recorded; nothing downstream.
         rows = ledger.read()
-        assert len(rows) == 1
-        assert rows[0].stage == "preprocess"
+        assert len(rows) == 2
+        assert all(r.stage == "preprocess" for r in rows)
 
-    def test_returns_retrieved_summaries_as_evidence(self, tmp_path: Path):
+    def test_evidence_includes_community_reports_or_chunk_text(self, tmp_path: Path):
+        """Local search packs community reports + chunk text into the
+        context; both should surface as evidence on the result."""
         document = "Alice met Bob in London. They went to the British Museum."
         answerer = _ScriptedAnswerer([
+            # Initial extraction (chunk 0)
             json.dumps({
                 "entities": [
                     {"name": "Alice", "type": "person", "description": "x"},
@@ -300,8 +343,12 @@ class TestRunGraphragEndToEnd:
                     {"source": "British Museum", "target": "London", "description": "in"},
                 ],
             }),
-            "First community report content.",
-            "Second community report content.",
+            # Gleaning pass (empty → break)
+            json.dumps({"entities": [], "relationships": []}),
+            # Community reports (Louvain output is partition-dependent;
+            # provide enough scripted responses for up to 2 communities)
+            "## Title\nFirst community\n\n## Summary\nFirst.\n\n## Findings\n- One.",
+            "## Title\nSecond community\n\n## Summary\nSecond.\n\n## Findings\n- Two.",
             "Final answer.",
         ])
         embedder = _StubEmbedder()
@@ -312,8 +359,10 @@ class TestRunGraphragEndToEnd:
             embedder=embedder, ledger=ledger,
         )
         assert result.failed is False
-        # retrieved_evidence_sentences should carry one or more
-        # community-report summaries that the local search picked.
+        # evidence is union(community_reports_packed, chunk_text_packed)
+        # — at least one of the two should be non-empty for this input.
         assert len(result.retrieved_evidence_sentences) >= 1
-        for s in result.retrieved_evidence_sentences:
-            assert "community report" in s.lower()
+        # Community-report sections produced by the scripted answerer
+        # carry the "## Title" marker; the chunk text carries "Alice".
+        joined = "\n".join(result.retrieved_evidence_sentences)
+        assert "## Title" in joined or "Alice" in joined
