@@ -14,7 +14,7 @@ endif
 	step-0 step-1 step-2 step-3-encoder step-3-dry-run \
 	step-3-dry-run-flat step-3-dry-run-naive-rag \
 	step-3-dry-run-raptor step-3-dry-run-graphrag \
-	step-3-summary \
+	step-3-summary phase-f-kendall \
 	data-download build-calibration \
 	codabench-format codabench-submit codabench-extract
 
@@ -51,6 +51,14 @@ step-3-dry-run-graphrag:
 step-3-summary:
 	@test -n "$(RUN)" || (echo "RUN=<run_id> is required" >&2; exit 1)
 	@$(PYTHON) -m pilot.cli.step_3_summary --run outputs/runs/$(RUN)
+
+phase-f-kendall:
+	@test -n "$(RUN_A)" || (echo "RUN_A=<run_id_primary> is required" >&2; exit 1)
+	@test -n "$(RUN_B)" || (echo "RUN_B=<run_id_alternate> is required" >&2; exit 1)
+	@$(PYTHON) -m pilot.cli.phase_f_kendall \
+		--run-a outputs/runs/$(RUN_A) --run-b outputs/runs/$(RUN_B) \
+		--label-a $(if $(LABEL_A),$(LABEL_A),primary) \
+		--label-b $(if $(LABEL_B),$(LABEL_B),alternate)
 
 data-download:
 	@$(PYTHON) -m pilot.data.download
