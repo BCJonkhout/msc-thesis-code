@@ -23,6 +23,7 @@ export NUMBA_NUM_THREADS := 1
 	step-3-dry-run-flat step-3-dry-run-naive-rag \
 	step-3-dry-run-raptor step-3-dry-run-graphrag \
 	step-3-summary step-4-variance phase-f-kendall phase-f-pareto \
+	resume-phase-f1-v2 \
 	data-download build-calibration \
 	codabench-format codabench-submit codabench-extract
 
@@ -83,6 +84,13 @@ phase-f-pareto:
 		--reference-label $(if $(REF_LABEL),$(REF_LABEL),reference) \
 		--candidates $(addprefix outputs/runs/,$(CANDIDATES)) \
 		$(if $(OUT),--out $(OUT))
+
+# Crash-recovery helper for the Phase F.1 v2 sweep. Auto-detects the
+# most recent matching run dir, ensures Ollama is up, and resumes
+# (Flash Lite / 4-arch / QASPER / literature prompt). Idempotent —
+# re-run after a laptop crash to pick up where the sweep left off.
+resume-phase-f1-v2:
+	@bash scripts/resume_phase_f1_v2.sh
 
 data-download:
 	@$(PYTHON) -m pilot.data.download

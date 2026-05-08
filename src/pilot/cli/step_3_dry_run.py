@@ -476,9 +476,20 @@ def run_dry_run(
                     **scores,
                 }
                 per_arch_predictions[arch].append(row)
-                # Crash-safe incremental flush.
+                # Crash-safe incremental flush. fsync forces the OS
+                # buffer cache to disk so a power loss after the line
+                # was written keeps the prediction durable. Cost: a
+                # few ms per row vs. minutes of re-running the whole
+                # architecture on a hard crash. (Logged once; if the
+                # platform doesn't support fsync, swallow the error so
+                # the dispatcher keeps moving.)
                 pred_files[arch].write(json.dumps(row, ensure_ascii=False) + "\n")
                 pred_files[arch].flush()
+                try:
+                    import os as _os
+                    _os.fsync(pred_files[arch].fileno())
+                except (OSError, AttributeError):
+                    pass
                 for metric, value in scores.items():
                     if isinstance(value, (int, float)):
                         per_arch_scores[arch][metric].append(float(value))

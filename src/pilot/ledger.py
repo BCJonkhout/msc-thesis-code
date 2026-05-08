@@ -153,6 +153,18 @@ class CostLedger:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec.to_dict(), separators=(",", ":")))
             f.write("\n")
+            f.flush()
+            # fsync so a power-loss after the LLM call (which we
+            # already paid for) keeps the cost row durable on disk.
+            # Cost: ~1ms per row; rows happen at LLM-call cadence
+            # which is much slower, so the wall-clock impact is
+            # negligible. Swallow OSError on platforms without fsync
+            # so the ledger stays usable.
+            try:
+                import os as _os
+                _os.fsync(f.fileno())
+            except (OSError, AttributeError):
+                pass
 
     def read(self) -> list[CallRecord]:
         """Read all rows back as CallRecord instances. Used for tests + replay."""
