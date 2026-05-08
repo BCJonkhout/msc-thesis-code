@@ -37,12 +37,32 @@ naive_rag:
 
 raptor:
   retrieval_k:
-    value: 12
+    value: 10
     source: lit:sarthi2024raptor
-    rationale: Sarthi et al. 2024 § 5 stable operating point for collapsed-tree.
+    rationale: >
+      Sarthi et al. 2024 § 4 reports "approximately top-20 nodes
+      within a 2000-token budget" for collapsed-tree retrieval at
+      inference; the budget cap dominates so the integer-k value
+      is operating-point-dependent. Our code uses k=10 with the
+      2000-token retrieval budget, which selects roughly the
+      paper's stable point on QASPER-scale documents.
+  retrieval_max_tokens:
+    value: 2000
+    source: lit:sarthi2024raptor
+    rationale: Paper § 4 retrieval-budget cap.
   tree_depth_cap:
-    value: 4
+    value: 5
     source: lit:sarthi2024raptor
+    rationale: >
+      Sarthi et al. 2024 § 3.1 caps the recursive tree at 5
+      layers; the parthsarthi03/raptor reference repo enforces
+      the same cap (`tb_num_layers=5`). Earlier draft of this
+      file said 4 — transcription error from Step 0 planning,
+      reconciled in Step 5.
+  leaf_chunk_max_tokens:
+    value: 100
+    source: lit:sarthi2024raptor
+    rationale: Paper § 3.1 leaf-chunk size for the recursive split.
   summary_max_tokens:
     value: 200
     source: lit:sarthi2024raptor
@@ -58,19 +78,49 @@ raptor:
     source: rule:seed-42-everywhere
 
 graphrag:
-  community_selection_depth:
-    value: 2
+  # The pilot uses a from-scratch faithful implementation of
+  # Edge et al. 2024 § 3.1 against the pilot's existing primitives
+  # (see code/src/pilot/architectures/graphrag.py) rather than
+  # Microsoft's `graphrag` package. This was a Step 3 decision to
+  # avoid the 10-class LLMCompletion shim required to make the
+  # official package observable through the cost ledger. The
+  # parameters below are reconciled with the from-scratch code.
+  chunk_size_tokens:
+    value: 600
     source: lit:edge2024local
-    rationale: >
-      Microsoft GraphRAG paper default for the local-search variant.
-  entity_extraction_prompt:
-    value: microsoft_graphrag_default
+    rationale: Edge et al. 2024 § 4.1.1 chunk size.
+  chunk_overlap_tokens:
+    value: 100
     source: lit:edge2024local
+    rationale: Edge et al. 2024 § 4.1.1 chunk overlap.
   community_detection:
-    algorithm: leiden
+    algorithm: louvain
+    source: rule:from-scratch-implementation-step3
+    rationale: >
+      Paper uses hierarchical Leiden via graspologic; from-scratch
+      implementation uses NetworkX 3.x's built-in Louvain (flat
+      communities). Documented as a deliberate simplification
+      in graphrag.py module docstring; Phase G can revisit if
+      hierarchical-community ablation is added to the optional
+      grid.
     seed:
       value: 42
       source: rule:seed-42-everywhere
+  local_search_top_k_entities:
+    value: 8
+    source: lit:edge2024local
+    rationale: >
+      Edge et al. 2024 § 4 local-search default for entity
+      retrieval at query time.
+  local_search_top_k_reports:
+    value: 3
+    source: lit:edge2024local
+    rationale: >
+      Edge et al. 2024 § 4 local-search default for community-report
+      retrieval at query time.
+  entity_extraction_prompt:
+    value: microsoft_graphrag_default
+    source: lit:edge2024local
   per_document_cost_guard_usd:
     value: 5.00
     source: pilot:5.8#11

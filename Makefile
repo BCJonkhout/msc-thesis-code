@@ -22,7 +22,7 @@ export NUMBA_NUM_THREADS := 1
 	step-0 step-1 step-2 step-3-encoder step-3-dry-run \
 	step-3-dry-run-flat step-3-dry-run-naive-rag \
 	step-3-dry-run-raptor step-3-dry-run-graphrag \
-	step-3-summary phase-f-kendall \
+	step-3-summary step-4-variance phase-f-kendall \
 	data-download build-calibration \
 	codabench-format codabench-submit codabench-extract
 
@@ -67,6 +67,13 @@ phase-f-kendall:
 		--run-a outputs/runs/$(RUN_A) --run-b outputs/runs/$(RUN_B) \
 		--label-a $(if $(LABEL_A),$(LABEL_A),primary) \
 		--label-b $(if $(LABEL_B),$(LABEL_B),alternate)
+
+step-4-variance:
+	@test -n "$(RUNS)" || (echo "RUNS='<run_id_1> <run_id_2> ...' is required" >&2; exit 1)
+	@$(PYTHON) -m pilot.cli.step_4_variance \
+		--runs $(addprefix outputs/runs/,$(RUNS)) \
+		--architecture $(if $(ARCH),$(ARCH),flat) \
+		--metric $(if $(METRIC),$(METRIC),answer_f1)
 
 data-download:
 	@$(PYTHON) -m pilot.data.download
