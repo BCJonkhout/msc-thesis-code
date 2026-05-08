@@ -22,7 +22,7 @@ export NUMBA_NUM_THREADS := 1
 	step-0 step-1 step-2 step-3-encoder step-3-dry-run \
 	step-3-dry-run-flat step-3-dry-run-naive-rag \
 	step-3-dry-run-raptor step-3-dry-run-graphrag \
-	step-3-summary step-4-variance phase-f-kendall \
+	step-3-summary step-4-variance phase-f-kendall phase-f-pareto \
 	data-download build-calibration \
 	codabench-format codabench-submit codabench-extract
 
@@ -74,6 +74,15 @@ step-4-variance:
 		--runs $(addprefix outputs/runs/,$(RUNS)) \
 		--architecture $(if $(ARCH),$(ARCH),flat) \
 		--metric $(if $(METRIC),$(METRIC),answer_f1)
+
+phase-f-pareto:
+	@test -n "$(REF)" || (echo "REF=<reference_run_id> is required" >&2; exit 1)
+	@test -n "$(CANDIDATES)" || (echo "CANDIDATES='<id_a> <id_b> ...' is required" >&2; exit 1)
+	@$(PYTHON) -m pilot.cli.phase_f_pareto \
+		--reference outputs/runs/$(REF) \
+		--reference-label $(if $(REF_LABEL),$(REF_LABEL),reference) \
+		--candidates $(addprefix outputs/runs/,$(CANDIDATES)) \
+		$(if $(OUT),--out $(OUT))
 
 data-download:
 	@$(PYTHON) -m pilot.data.download
