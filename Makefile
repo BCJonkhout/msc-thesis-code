@@ -10,6 +10,14 @@ ifneq (,$(wildcard .venv/bin/python))
 	PYTHON := .venv/bin/python
 endif
 
+# RAPTOR's vendored UMAP+GMM clustering and GraphRAG's
+# NetworkX+faiss imports both pull in OpenMP-threaded native code.
+# Pinning to single-thread before Python starts avoids the Windows
+# segfault we hit on first import. Python-level os.environ.setdefault
+# is too late — OpenMP reads the env var at native-library-load time.
+export OMP_NUM_THREADS := 1
+export NUMBA_NUM_THREADS := 1
+
 .PHONY: test \
 	step-0 step-1 step-2 step-3-encoder step-3-dry-run \
 	step-3-dry-run-flat step-3-dry-run-naive-rag \
