@@ -242,7 +242,16 @@ def _invoke_architecture(
             options=item["options"],
             answerer=answerer,
             answerer_model=answerer_model,
-            summary_model=None,  # default to answerer model; can override per Step 3 #10
+            # Per pilot plan § 5.8 row #10: cheap-tier summaries are
+            # the default for RAPTOR's preprocessing. Asymmetric to
+            # match Sarthi et al. 2024's reference implementation
+            # (gpt-3.5-turbo summaries + gpt-4 answerer) and the
+            # Microsoft GraphRAG paper's pattern. Enables full
+            # 20-paper QASPER calibration in tractable wallclock
+            # — on Gemini 3.1 Pro Preview's thinking model the
+            # answerer call is ~60s; Flash-Lite preprocessing is
+            # ~5-10s/call.
+            summary_model="gemini-3.1-flash-lite-preview",
             embedder=embedder,
             ledger=ledger,
         )
@@ -255,6 +264,12 @@ def _invoke_architecture(
             options=item["options"],
             answerer=answerer,
             answerer_model=answerer_model,
+            # Same asymmetric-tier rationale as RAPTOR above:
+            # entity extraction + community summarisation on Flash-
+            # Lite (~30 LLM calls per paper at ~5s each); final
+            # answer on Pro Preview. Matches Edge et al. 2024
+            # production setup pattern.
+            summary_model="gemini-3.1-flash-lite-preview",
             embedder=embedder,
             ledger=ledger,
         )
