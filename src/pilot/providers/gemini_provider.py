@@ -66,10 +66,25 @@ class GeminiProvider(AnswererProvider):
         # the CachedContent first and passes its name in via
         # config.cached_content; that path is added when Step 1 wires
         # the cross-model harness.
+        #
+        # Gemini 3.1 Pro Preview (and Gemini 2.5+ thinking models in
+        # general) charge invisible "thinking" tokens against
+        # max_output_tokens before any visible response is emitted.
+        # With max_output_tokens=1024, JSON-shaped extraction prompts
+        # were getting ~990 tokens of thinking and only ~30 tokens of
+        # visible response — which truncated the JSON mid-string.
+        # Workaround: bump the default cap for thinking models so the
+        # visible response has headroom. The caller can still override
+        # via the explicit max_tokens kwarg.
+        is_thinking_model = "gemini-3" in model.lower() or "gemini-2.5" in model.lower()
+        effective_max_tokens = max_tokens if max_tokens is not None else 1024
+        if is_thinking_model and effective_max_tokens < 4096:
+            effective_max_tokens = max(effective_max_tokens * 4, 4096)
+
         config = types.GenerateContentConfig(
             temperature=temperature,
             top_p=top_p,
-            max_output_tokens=max_tokens if max_tokens is not None else 1024,
+            max_output_tokens=effective_max_tokens,
         )
 
         start = time.perf_counter()
