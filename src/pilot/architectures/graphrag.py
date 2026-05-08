@@ -539,8 +539,32 @@ def _local_search_build_context(
         return "(no entities extracted)", []
 
     # 1. Embed query + every entity description.
-    entity_texts = [f"{e.name}: {e.description}" for e in entities]
+    #
+    # Heavily-mentioned entities accumulate concatenated descriptions
+    # across every chunk they appear in; for a long document with
+    # many chunks an entity description can grow to several thousand
+    # characters. Truncate each entity-text to a generous prefix —
+    # the embedding signal is preserved without sending the entire
+    # multi-thousand-character concatenation through Ollama.
+    _ENT_DESC_CHAR_CAP = 1000
+    entity_texts = [
+        f"{e.name}: {e.description[:_ENT_DESC_CHAR_CAP]}"
+        for e in entities
+    ]
     embed_payload = [query] + entity_texts
+
+    # BGE-M3 served by Ollama occasionally produces NaN values in
+    # embedding vectors for short / sparse / formatting-only inputs;
+    # the server then returns 500 on the WHOLE batch because Go's
+    # JSON encoder rejects NaN. Embed each input individually so a
+    # single bad entity doesn't kill the document. Skip entries that
+    # 500 by substituting a zero vector — they sort to the bottom of
+    # cosine ranking and are effectively excluded from local-search
+    # retrieval without aborting the whole architecture run.
+    import httpx  # local import keeps the top-level dependency surface unchanged
+    all_vectors: list[list[float]] = []
+    skipped = 0
+    embed_dim: int | None = None
     with ledger.log_call(
         architecture="graphrag",
         stage=Stage.RETRIEVAL,
@@ -548,7 +572,36 @@ def _local_search_build_context(
         prompt="\n\n".join(embed_payload),
         run_index=run_index,
     ) as rec:
-        embed_result = embedder.embed(embed_payload)
+        for text in embed_payload:
+            try:
+                r = embedder.embed([text])
+                vec = r.embeddings[0] if r.embeddings else []
+                if vec:
+                    embed_dim = embed_dim or len(vec)
+                all_vectors.append(vec or [])
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 500:
+                    skipped += 1
+                    all_vectors.append([])  # dim resolved on first success
+                else:
+                    raise
+        # Backfill zero vectors for the BGE-M3 NaN skips so the
+        # downstream cosine sort treats them as unranked rather than
+        # crashing on length mismatch.
+        if embed_dim is not None:
+            all_vectors = [
+                v if v else [0.0] * embed_dim
+                for v in all_vectors
+            ]
+        elif all_vectors:
+            # Pathological case: every input produced NaN. Bail out
+            # gracefully rather than computing similarity on empty
+            # vectors.
+            return (
+                "(local-search embedding failed: every entity description"
+                " produced NaN on the BGE-M3 server)",
+                [],
+            )
         rec.uncached_input_tokens = max(
             1, sum(len(t) for t in embed_payload) // 4
         )
@@ -556,11 +609,11 @@ def _local_search_build_context(
         rec.output_tokens = 0
         rec.response_hash = sha256_hex(
             "|".join(
-                f"{v[0]:.6f}" for v in embed_result.embeddings if v
+                f"{v[0]:.6f}" for v in all_vectors if v
             )
         )
-    query_vec = embed_result.embeddings[0]
-    entity_vecs = embed_result.embeddings[1:]
+    query_vec = all_vectors[0]
+    entity_vecs = all_vectors[1:]
 
     # 2. Top-k entities by query-entity-description cosine.
     scores = [_cosine(query_vec, v) for v in entity_vecs]
