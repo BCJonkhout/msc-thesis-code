@@ -294,7 +294,14 @@ _RAPTOR_DEFAULTS = dict(
     tb_summarization_length=200, # summary target ≈ 200 tokens (pilot's lock)
     tr_top_k=10,                 # retrieval k (collapsed-tree picks by token budget)
     tr_threshold=0.5,
-    tr_selection_mode="threshold",
+    # Sarthi 2024 §4 collapsed-tree retrieval picks nodes greedily
+    # by similarity until the token budget hits; the threshold mode
+    # would prune low-similarity nodes even when budget allows. The
+    # paper's headline behaviour is top-k by similarity within budget,
+    # which `top_k` selection_mode + 2000-token retrieval_max_tokens
+    # delivers. Earlier pilot draft used "threshold" — paper-faithful
+    # correction at audit (paper_implementation_audit.md).
+    tr_selection_mode="top_k",
     collapse_tree=True,
     retrieval_max_tokens=2000,   # paper §4 "approximately top-20 nodes"
 )

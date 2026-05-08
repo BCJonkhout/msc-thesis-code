@@ -127,12 +127,46 @@ _TEXT_UNIT_PROP = 0.50  # `LocalSearchDefaults.text_unit_prop`
 
 _ENTITY_EXTRACT_PROMPT = """You are extracting structured information from a document chunk.
 
-Identify all named entities (people, places, organisations, events, concepts, methods, datasets) and the relationships between them. Respond with strict JSON of the form:
+Identify all named entities (people, places, organisations, events, concepts, methods, datasets, models, metrics) and the relationships between them. Respond with strict JSON of the form:
 
 {{"entities": [{{"name": "...", "type": "...", "description": "..."}}, ...],
  "relationships": [{{"source": "...", "target": "...", "description": "..."}}, ...]}}
 
 Use the entity name exactly as it appears in the text. Keep descriptions to one sentence. If a chunk has no entities, return {{"entities": [], "relationships": []}}.
+
+# Examples
+
+Example 1.
+Chunk: "We evaluate on the QASPER dataset using GPT-4 with retrieval-augmented generation. The Lewis et al. 2020 RAG model serves as our baseline."
+Output:
+{{"entities": [
+    {{"name": "QASPER", "type": "dataset", "description": "Evaluation dataset used in this work."}},
+    {{"name": "GPT-4", "type": "model", "description": "Large language model used for answer generation."}},
+    {{"name": "retrieval-augmented generation", "type": "method", "description": "Generation technique paired with GPT-4 in this work."}},
+    {{"name": "Lewis et al. 2020 RAG", "type": "method", "description": "Baseline RAG model from Lewis et al. 2020."}}
+  ],
+ "relationships": [
+    {{"source": "GPT-4", "target": "retrieval-augmented generation", "description": "GPT-4 is paired with RAG."}},
+    {{"source": "GPT-4", "target": "QASPER", "description": "GPT-4 is evaluated on QASPER."}},
+    {{"source": "Lewis et al. 2020 RAG", "target": "GPT-4", "description": "Lewis 2020 RAG is the baseline GPT-4 is compared against."}}
+  ]}}
+
+Example 2.
+Chunk: "Naive RAG performs the worst, achieving 0.137 F1, while RAPTOR scores 0.267 on the QASPER calibration pool."
+Output:
+{{"entities": [
+    {{"name": "Naive RAG", "type": "method", "description": "Baseline RAG approach achieving 0.137 F1 on QASPER calibration."}},
+    {{"name": "RAPTOR", "type": "method", "description": "Tree-based retrieval method achieving 0.267 F1 on QASPER calibration."}},
+    {{"name": "QASPER calibration pool", "type": "dataset", "description": "Subset of QASPER used for calibration."}},
+    {{"name": "F1", "type": "metric", "description": "Token-level F1 used to score answers."}}
+  ],
+ "relationships": [
+    {{"source": "Naive RAG", "target": "QASPER calibration pool", "description": "Naive RAG is evaluated on the QASPER calibration pool."}},
+    {{"source": "RAPTOR", "target": "QASPER calibration pool", "description": "RAPTOR is evaluated on the QASPER calibration pool."}},
+    {{"source": "Naive RAG", "target": "RAPTOR", "description": "Both methods are compared on the same QASPER pool; RAPTOR scores higher."}}
+  ]}}
+
+# Now extract entities and relationships from the following chunk
 
 Document chunk:
 {chunk}
