@@ -297,6 +297,49 @@ def _score_item(
 # Orchestrator
 # ──────────────────────────────────────────────────────────────────────
 
+def _load_resume_state(
+    resume_from: Path | None,
+    architectures: list[str],
+) -> tuple[
+    dict[str, list[dict[str, Any]]],
+    dict[str, dict[str, list[float]]],
+    set[tuple[str, str, str]],
+]:
+    """Load already-completed (architecture, paper_id, question_id) rows
+    from a prior run's per-arch predictions JSONL files.
+
+    Returns a tuple of (per_arch_predictions, per_arch_scores,
+    completed_keys) suitable for seeding the orchestrator state.
+    Each completed_keys entry is the (arch, paper_id, question_id)
+    tuple already on disk; the main loop skips matching items.
+    """
+    per_arch_predictions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    per_arch_scores: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    completed: set[tuple[str, str, str]] = set()
+
+    if resume_from is None:
+        return per_arch_predictions, per_arch_scores, completed
+
+    for arch in architectures:
+        path = resume_from / f"{arch}_predictions.jsonl"
+        if not path.exists():
+            continue
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                per_arch_predictions[arch].append(row)
+                completed.add((arch, row.get("paper_id", ""), row.get("question_id", "")))
+                for metric, value in row.items():
+                    if metric in {"answer_f1", "evidence_f1", "accuracy"} and isinstance(value, (int, float)):
+                        per_arch_scores[arch][metric].append(float(value))
+
+    return per_arch_predictions, per_arch_scores, completed
+
+
 def run_dry_run(
     *,
     architectures: list[str],
@@ -308,6 +351,7 @@ def run_dry_run(
     data_root: Path,
     out_dir: Path,
     prompt_style: str = "pilot",
+    resume_from: Path | None = None,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     if "qasper" in datasets:
@@ -327,21 +371,36 @@ def run_dry_run(
     runs_root = _project_root() / "outputs" / "runs"
     ledger = CostLedger(run_id=run_id, root=runs_root)
 
-    per_arch_predictions: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    per_arch_scores: dict[str, dict[str, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
+    per_arch_predictions, per_arch_scores, completed = _load_resume_state(
+        resume_from, architectures
     )
     failures: list[dict[str, Any]] = []
 
-    # Open per-arch JSONL files for incremental writes so a crash mid-run
-    # does not lose all predictions. The end-of-loop write below is now
-    # redundant for completed rows but is kept as a no-op safety net.
+    if completed:
+        print(
+            f"[step3-dry-run] resume_from={resume_from} reusing "
+            f"{sum(len(v) for v in per_arch_predictions.values())} prior rows "
+            f"across {len(per_arch_predictions)} archs",
+            file=sys.stderr,
+        )
+
+    # Open per-arch JSONL files in append mode when resuming so prior
+    # rows are preserved; otherwise truncate. Crash-safe incremental
+    # flush is in place below regardless.
+    open_mode = "a" if completed else "w"
     pred_files: dict[str, Any] = {
         arch: (ledger.run_dir / f"{arch}_predictions.jsonl").open(
-            "w", encoding="utf-8"
+            open_mode, encoding="utf-8"
         )
         for arch in architectures
     }
+    if completed:
+        # When resuming, replay the prior rows into the new run's
+        # JSONL too so the new run dir is self-contained.
+        for arch, rows in per_arch_predictions.items():
+            for row in rows:
+                pred_files[arch].write(json.dumps(row, ensure_ascii=False) + "\n")
+            pred_files[arch].flush()
 
     print(f"[step3-dry-run] run_id={run_id} items={len(items)} archs={architectures}", file=sys.stderr)
 
@@ -349,6 +408,10 @@ def run_dry_run(
         for item in items:
             for arch in architectures:
                 tag = f"{arch}/{item['dataset']}/{item['paper_id']}/{item['question_id']}"
+                key = (arch, item["paper_id"], item["question_id"])
+                if key in completed:
+                    print(f"[step3-dry-run] SKIP {tag} (already in resume_from)", file=sys.stderr)
+                    continue
                 try:
                     result = _invoke_architecture(
                         arch,
@@ -484,6 +547,19 @@ def main() -> int:
     parser.add_argument(
         "--out", type=Path, default=_project_root() / "outputs" / "sanity"
     )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a prior run directory (outputs/runs/<run_id>/) "
+            "whose <arch>_predictions.jsonl rows should be reused. "
+            "Items already in those files are SKIPPED in this run; "
+            "only the missing ones are re-executed. The new run dir "
+            "is self-contained — prior rows are copied forward into "
+            "its predictions JSONL so it can stand alone for analysis."
+        ),
+    )
     args = parser.parse_args()
 
     summary = run_dry_run(
@@ -496,6 +572,7 @@ def main() -> int:
         data_root=args.data_root,
         out_dir=args.out,
         prompt_style=args.prompt_style,
+        resume_from=args.resume_from,
     )
     print(json.dumps(summary, indent=2))
     print(f"\nWrote verdict: {summary['verdict_path']}", file=sys.stderr)
