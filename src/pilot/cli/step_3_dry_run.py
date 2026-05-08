@@ -205,6 +205,8 @@ def _invoke_architecture(
     ledger: CostLedger,
     naive_rag_top_k: int,
     prompt_style: str = "pilot",
+    summary_answerer=None,
+    summary_model: str | None = None,
 ) -> ArchitectureResult:
     if architecture == "flat":
         return run_flat(
@@ -242,16 +244,13 @@ def _invoke_architecture(
             options=item["options"],
             answerer=answerer,
             answerer_model=answerer_model,
-            # Per pilot plan § 5.8 row #10: cheap-tier summaries are
-            # the default for RAPTOR's preprocessing. Asymmetric to
-            # match Sarthi et al. 2024's reference implementation
-            # (gpt-3.5-turbo summaries + gpt-4 answerer) and the
-            # Microsoft GraphRAG paper's pattern. Enables full
-            # 20-paper QASPER calibration in tractable wallclock
-            # — on Gemini 3.1 Pro Preview's thinking model the
-            # answerer call is ~60s; Flash-Lite preprocessing is
-            # ~5-10s/call.
-            summary_model="gemini-3.1-flash-lite-preview",
+            # Per pilot plan § 5.8 row #10 the cheap-tier summary is
+            # the default for RAPTOR's preprocessing. Default value
+            # comes from CLI; ``summary_answerer`` may route the
+            # summary call through a different provider when the
+            # answerer is non-Google (Phase F extension protocol).
+            summary_model=summary_model,
+            summary_answerer=summary_answerer,
             embedder=embedder,
             ledger=ledger,
         )
@@ -264,12 +263,8 @@ def _invoke_architecture(
             options=item["options"],
             answerer=answerer,
             answerer_model=answerer_model,
-            # Same asymmetric-tier rationale as RAPTOR above:
-            # entity extraction + community summarisation on Flash-
-            # Lite (~30 LLM calls per paper at ~5s each); final
-            # answer on Pro Preview. Matches Edge et al. 2024
-            # production setup pattern.
-            summary_model="gemini-3.1-flash-lite-preview",
+            summary_model=summary_model,
+            summary_answerer=summary_answerer,
             embedder=embedder,
             ledger=ledger,
         )
@@ -367,6 +362,8 @@ def run_dry_run(
     out_dir: Path,
     prompt_style: str = "pilot",
     resume_from: Path | None = None,
+    summary_provider: str | None = None,
+    summary_model: str | None = None,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     if "qasper" in datasets:
@@ -378,6 +375,21 @@ def run_dry_run(
         raise SystemExit("calibration pool is empty; run make build-calibration")
 
     answerer = get_provider(answerer_provider)
+
+    # Multi-provider routing: when the summary stage runs on a
+    # different provider than the answerer (Phase F extension
+    # protocol), build a separate summary_answerer. When the
+    # summary provider matches the answerer provider, reuse the
+    # same provider instance to avoid double-instantiation. When
+    # neither summary flag is set, the architecture runners fall
+    # back to using the answerer for the summary stage too.
+    summary_answerer = None
+    if summary_provider is not None:
+        summary_answerer = (
+            answerer if summary_provider == answerer_provider
+            else get_provider(summary_provider)
+        )
+
     needs_embedder = bool({"naive_rag", "raptor", "graphrag"} & set(architectures))
     embedder = OllamaEmbedder(model=embedder_model) if needs_embedder else None
     chunker = SentenceBoundaryChunker(chunk_size_tokens=384, overlap_tokens=0) if "naive_rag" in architectures else None
@@ -438,6 +450,8 @@ def run_dry_run(
                         ledger=ledger,
                         naive_rag_top_k=naive_rag_top_k,
                         prompt_style=prompt_style,
+                        summary_answerer=summary_answerer,
+                        summary_model=summary_model,
                     )
                 except Exception as exc:
                     failures.append({
@@ -508,6 +522,8 @@ def run_dry_run(
         "datasets": datasets,
         "answerer_provider": answerer_provider,
         "answerer_model": answerer_model,
+        "summary_provider": summary_provider or answerer_provider,
+        "summary_model": summary_model or answerer_model,
         "embedder_model": embedder_model,
         "naive_rag_top_k": naive_rag_top_k,
         "prompt_style": prompt_style,
@@ -544,6 +560,30 @@ def main() -> int:
     )
     parser.add_argument("--answerer-provider", default=_DEFAULT_ANSWERER_PROVIDER)
     parser.add_argument("--answerer-model", default=_DEFAULT_ANSWERER_MODEL)
+    parser.add_argument(
+        "--summary-provider",
+        default=None,
+        help=(
+            "Provider for the summary stage in RAPTOR + GraphRAG "
+            "(entity extraction, per-community summary, recursive "
+            "summary). Defaults to --answerer-provider; override "
+            "to route the summary stage through a different "
+            "provider while keeping the answerer fixed (Phase F "
+            "extension protocol — e.g. Grok answerer + Gemini "
+            "Flash Lite summary). Has no effect on Flat / "
+            "Naive RAG (no summary stage)."
+        ),
+    )
+    parser.add_argument(
+        "--summary-model",
+        default=None,
+        help=(
+            "Model id for the summary stage. Defaults to "
+            "--answerer-model. Pair with --summary-provider when "
+            "the summary model lives on a different provider "
+            "than the answerer."
+        ),
+    )
     parser.add_argument("--embedder-model", default=_DEFAULT_EMBEDDER_MODEL)
     parser.add_argument("--naive-rag-top-k", type=int, default=8)
     parser.add_argument(
@@ -588,6 +628,8 @@ def main() -> int:
         out_dir=args.out,
         prompt_style=args.prompt_style,
         resume_from=args.resume_from,
+        summary_provider=args.summary_provider,
+        summary_model=args.summary_model,
     )
     print(json.dumps(summary, indent=2))
     print(f"\nWrote verdict: {summary['verdict_path']}", file=sys.stderr)

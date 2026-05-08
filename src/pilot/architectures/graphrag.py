@@ -422,6 +422,7 @@ def run_graphrag(
     run_index: int = 0,
     max_tokens: int = 256,
     summary_model: str | None = None,
+    summary_answerer: AnswererProvider | None = None,
 ) -> ArchitectureResult:
     """Run the GraphRAG pipeline (extract → graph → communities → local search → answer).
 
@@ -432,8 +433,15 @@ def run_graphrag(
     document, which is the same thing the cost model assumes for
     a deployment-cost calculation. Caching across queries on the
     same document would be the obvious follow-up optimisation.
+
+    ``summary_answerer`` lets entity extraction + per-community
+    summarisation run on a different provider than the final answer
+    call (Phase F extension protocol: e.g. Grok final answer +
+    Gemini Flash Lite preprocessing). When ``None`` the summary
+    stage uses the same provider as the answerer.
     """
     summary_model = summary_model or answerer_model
+    summary_answerer = summary_answerer or answerer
 
     # 1. Chunk the document at the paper-default 600 / 100.
     chunker = SentenceBoundaryChunker(
@@ -451,7 +459,7 @@ def run_graphrag(
     # 2. Extract entities + relationships per chunk.
     entities, relationships = _extract_entities_per_chunk(
         chunks,
-        answerer=answerer, answerer_model=summary_model,
+        answerer=summary_answerer, answerer_model=summary_model,
         ledger=ledger, run_index=run_index,
     )
     if not entities:
@@ -468,7 +476,7 @@ def run_graphrag(
     # 4. Per-community summaries.
     reports = _summarise_communities(
         g, communities,
-        answerer=answerer, answerer_model=summary_model,
+        answerer=summary_answerer, answerer_model=summary_model,
         ledger=ledger, run_index=run_index,
     )
 

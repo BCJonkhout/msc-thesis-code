@@ -296,20 +296,25 @@ def run_raptor(
     ledger: CostLedger,
     run_index: int = 0,
     max_tokens: int = 256,
+    summary_answerer: AnswererProvider | None = None,
 ) -> ArchitectureResult:
     """Build a RAPTOR tree over ``document`` and answer ``query``.
 
     The summary model defaults to the answerer model unless
-    overridden (Step 3 sub-experiment row #10 may pick a cheaper
-    summary tier; until that experiment closes, both are the same).
+    overridden. ``summary_answerer`` lets the summary stage run
+    on a different provider than the final answerer (Phase F
+    extension protocol: e.g. Grok answerer + Gemini Flash Lite
+    summary). When ``summary_answerer`` is ``None`` the summary
+    calls go through the same provider as the answerer.
     """
     summary_model = summary_model or answerer_model
+    summary_answerer = summary_answerer or answerer
 
     embedding_adapter = _LedgerEmbeddingModel(
         embedder=embedder, ledger=ledger, run_index=run_index
     )
     summary_adapter = _LedgerSummarizationModel(
-        answerer=answerer, model=summary_model,
+        answerer=summary_answerer, model=summary_model,
         ledger=ledger, run_index=run_index,
     )
     qa_adapter = _LedgerQAModel(

@@ -217,3 +217,97 @@ class TestUnknownArchitecture:
                 embedder=MagicMock(), chunker=None,
                 ledger=MagicMock(), naive_rag_top_k=8,
             )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Multi-provider routing for the summary stage (Phase F extension)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestSummaryProviderRouting:
+    """RAPTOR + GraphRAG accept ``summary_answerer`` + ``summary_model``
+    so the summary stage can run on a different provider than the
+    answerer (e.g. Grok answerer + Gemini Flash Lite summary). The
+    dispatcher must thread both through to the runners; Flat and
+    Naive RAG have no summary stage and should ignore both kwargs.
+    """
+
+    def test_raptor_receives_summary_provider_and_model(
+        self, fake_item, stub_dependencies
+    ):
+        answerer = MagicMock(name="grok_answerer")
+        summary = MagicMock(name="gemini_summary")
+        cli._invoke_architecture(
+            "raptor", fake_item,
+            answerer=answerer, answerer_model="grok-4.20-0309-non-reasoning",
+            embedder=MagicMock(), chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+            summary_answerer=summary,
+            summary_model="gemini-3.1-flash-lite-preview",
+        )
+        kwargs = stub_dependencies["raptor"][0]
+        assert kwargs["summary_answerer"] is summary
+        assert kwargs["summary_model"] == "gemini-3.1-flash-lite-preview"
+        assert kwargs["answerer"] is answerer
+        assert kwargs["answerer_model"] == "grok-4.20-0309-non-reasoning"
+
+    def test_graphrag_receives_summary_provider_and_model(
+        self, fake_item, stub_dependencies
+    ):
+        answerer = MagicMock(name="grok_answerer")
+        summary = MagicMock(name="gemini_summary")
+        cli._invoke_architecture(
+            "graphrag", fake_item,
+            answerer=answerer, answerer_model="grok-4.20-0309-non-reasoning",
+            embedder=MagicMock(), chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+            summary_answerer=summary,
+            summary_model="gemini-3.1-flash-lite-preview",
+        )
+        kwargs = stub_dependencies["graphrag"][0]
+        assert kwargs["summary_answerer"] is summary
+        assert kwargs["summary_model"] == "gemini-3.1-flash-lite-preview"
+
+    def test_summary_kwargs_default_to_none_when_not_passed(
+        self, fake_item, stub_dependencies
+    ):
+        cli._invoke_architecture(
+            "raptor", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=MagicMock(), chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+        )
+        kwargs = stub_dependencies["raptor"][0]
+        assert kwargs.get("summary_answerer") is None
+        assert kwargs.get("summary_model") is None
+
+    def test_flat_does_not_receive_summary_kwargs(
+        self, fake_item, stub_dependencies
+    ):
+        cli._invoke_architecture(
+            "flat", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=None, chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+            summary_answerer=MagicMock(),
+            summary_model="other",
+        )
+        # Flat has no summary stage; the runner signature does not
+        # accept summary_* and would TypeError if forwarded.
+        kwargs = stub_dependencies["flat"][0]
+        assert "summary_answerer" not in kwargs
+        assert "summary_model" not in kwargs
+
+    def test_naive_rag_does_not_receive_summary_kwargs(
+        self, fake_item, stub_dependencies
+    ):
+        cli._invoke_architecture(
+            "naive_rag", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=MagicMock(), chunker=MagicMock(),
+            ledger=MagicMock(), naive_rag_top_k=8,
+            summary_answerer=MagicMock(),
+            summary_model="other",
+        )
+        kwargs = stub_dependencies["naive_rag"][0]
+        assert "summary_answerer" not in kwargs
+        assert "summary_model" not in kwargs
