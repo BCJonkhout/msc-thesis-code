@@ -291,25 +291,50 @@ rejected_candidates:
     rejection_detail: >
       Same as gpt-5.4-pro: Responses-API only.
 
-# ─── Final answerer choices (TBD; locked by pilot Step 7) ─────────────────────
+# ─── Final answerer choices (locked at Step 7 / Phase F.1) ────────────────────
 final_answerer:
-  primary: TBD
-  primary_source: pilot:5.8#6 + pilot:5.8#16
+  primary: gemini-3.1-flash-lite-preview
+  primary_source: pilot:5.8#6 + pilot:5.8#16 + empirical:phase_f1_2026-05-08
   primary_selection_rule: >
     Cheapest closed candidate that passes smoke (decision #6) AND
     maintains architecture rank in cross-model check (decision #16
     with Kendall's tau >= 0.67).
+  primary_selection_evidence: >
+    Phase F.1 (2026-05-08, run_id 20260508-997b9fdc): full
+    4-architecture × QASPER 20Q sweep on Flash Lite ranked the
+    architectures naive_rag (0.422) > flat (0.366) > raptor
+    (0.258) > graphrag (0.034). The Gemini Pro reference
+    (consolidated from runs 20260507-bd223851 + 20260508-6c08d55d
+    + 20260508-f2f02fde) ranked them naive_rag (0.371) > flat
+    (0.340) > raptor (0.267) > graphrag (0.048). Kendall's
+    tau-b = +1.0 over six pairs (6 concordant / 0 discordant)
+    >= 0.67 -> STABLE_RANK -> cheapest-passing rule fires.
+    Flash Lite is ~20x cheaper than Gemini Pro at the same
+    20Q-Flat scope ($0.010 vs $0.192 per sweep) and ~5x cheaper
+    on the full 4-architecture sweep ($0.126 vs $0.403). Verdict
+    written to outputs/sanity/phase_f1_kendall.json.
 
   alternate_for_cross_model_check: TBD
   alternate_source: pilot:5.8#16
   alternate_selection_rule: >
-    One alternate closed candidate from a different provider family;
-    used in the cross-model stability subsample alongside the primary
-    and one open-weights candidate. Drops back to primary-only after
-    the cross-model check resolves.
+    One alternate closed candidate from a different provider family
+    (i.e. NOT Google), used in the cross-model stability subsample
+    alongside the primary and one open-weights candidate. Drops back
+    to primary-only after the cross-model check resolves. Phase F.2
+    candidates available on the active slate: grok-4-1-fast-non-
+    reasoning, grok-4.20-0309-non-reasoning, grok-4.3 (xAI family).
 
   open_weights_for_cross_model_check: TBD
   open_weights_source: pilot:5.8#16
+  open_weights_candidates: >
+    deepseek/deepseek-v4-flash ($0.013/20Q-Flat) and deepseek/
+    deepseek-v4-pro ($0.041/20Q-Flat) on the active slate. Either
+    can serve as the open-weights row once multi-provider routing
+    is exercised against a non-Google primary; with Flash Lite as
+    primary, the open-weights row only matters for the optional
+    cross-model check. Run via --answerer-provider openrouter
+    --answerer-model deepseek/deepseek-v4-flash --summary-provider
+    google --summary-model gemini-3.1-flash-lite-preview.
 
   summary_model: gemini-3.1-flash-lite-preview
   summary_model_source: pilot:5.8#10 + empirical:step_3_2026-05-08
