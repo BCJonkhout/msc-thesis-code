@@ -311,12 +311,19 @@ final_answerer:
   open_weights_for_cross_model_check: TBD
   open_weights_source: pilot:5.8#16
 
-  summary_model: TBD
-  summary_model_source: pilot:5.8#10
+  summary_model: gemini-3.1-flash-lite-preview
+  summary_model_source: pilot:5.8#10 + empirical:step_3_2026-05-08
   summary_model_rule: >
-    Same family as primary at cheaper tier (Haiku 4.5 if primary is
-    Sonnet 4.6, Gemini 3.1 Flash if primary is Gemini 3.1 Pro Preview,
-    GPT-5.4 mini if primary is GPT-5.4). Validated by paired
+    Same family as primary at cheaper tier. Currently locked to
+    gemini-3.1-flash-lite-preview as the cheap-tier summary model
+    used by RAPTOR + GraphRAG preprocessing in Step 3 dry-runs;
+    final pairing locks against the chosen primary in Phase F.
+    For a Gemini-family primary the pairing is trivial
+    (Pro answerer + Flash Lite summary). For a non-Google primary,
+    multi-provider routing is required (work item #1 in Step 7);
+    summary stage stays on Flash Lite because cheap-tier
+    preprocessing tracks the Step 3 asymmetric-tier finding
+    rather than the answerer family. Validated by paired
     RAPTOR-build comparison; cheap tier kept if |Q_A − Q_B| <= 0.02.
 
 # ─── Smoke-phase rules (Step 1) ───────────────────────────────────────────────
