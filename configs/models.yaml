@@ -115,12 +115,17 @@ open_weights_candidates:
     license: open-weights
     released: 2026-04
     source: pilot:5.8#6
+    qasper_eligible: true
+    novelqa_eligible: false
+    novelqa_eligibility_source: empirical:pareto_phase_g_2026-05-13
     notes: >
-      Caveat: Kimi K2.6 native context is 262,142 tokens (~256k), well
-      below the 780k NovelQA threshold. This candidate cannot serve
-      full NovelQA novels and is restricted to QASPER + truncated
-      NovelQA in the cross-model check. Useful as a third open-weights
-      row on the smaller subset.
+      Kimi K2.6 native context is 262,142 tokens (~256k), well below
+      the 780k NovelQA threshold. This candidate cannot serve full
+      NovelQA novels in Flat full-context mode and is therefore
+      excluded from the NovelQA Phase G full grid. Retained on the
+      slate for QASPER measurement only. Reinstateable for NovelQA
+      via truncation if a future revision wants a short-form NovelQA
+      subset.
 
 # ─── Rejected / superseded candidates (documented for the audit trail) ───────
 rejected_candidates:
