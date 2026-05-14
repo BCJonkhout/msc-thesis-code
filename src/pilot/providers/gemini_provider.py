@@ -81,16 +81,51 @@ class GeminiProvider(AnswererProvider):
 
     @staticmethod
     def _retryable(exc: Exception) -> bool:
-        """True if ``exc`` is a transient Google API error worth retrying.
+        """True if ``exc`` is a transient API error worth retrying.
 
-        The google-genai SDK raises ``ServerError`` for 5xx and
-        ``ClientError`` for 4xx; both carry an integer ``.code``.
-        Anything else (network exception, JSON parse, etc.) is
-        non-retryable here — the dispatcher will record it as a hard
-        FAIL.
+        Two classes of failure are absorbed:
+
+        1. ``google.genai.errors.{ServerError,ClientError}`` carrying
+           a ``.code`` in {429, 500, 502, 503, 504}. These are the
+           overload / capacity signals Google's edge surfaces after
+           the SDK's own internal retry has given up.
+
+        2. ``httpx`` transport-level disconnects that bubble through
+           the google-genai SDK without an HTTP status: typically
+           ``RemoteProtocolError("Server disconnected without
+           sending a response.")`` — the server dropped the
+           connection mid-request before any response headers came
+           back. Observed in production under the NovelQA sweep on
+           the FIRST few GraphRAG entity-extraction calls of each
+           candidate (idle-pool connection that the Google edge
+           closed during the gap between candidates). Also
+           ``ReadError``, ``ConnectError``, ``WriteError`` — same
+           shape, same correct response (retry with backoff).
+
+        Everything else (JSON parse, schema-validation, auth) stays
+        non-retryable; the dispatcher records those as hard FAILs.
         """
+        # Class 1: API errors with a retryable status code
         code = getattr(exc, "code", None)
-        return isinstance(code, int) and code in _RETRYABLE_CODES
+        if isinstance(code, int) and code in _RETRYABLE_CODES:
+            return True
+        # Class 2: httpx transport-level errors
+        try:
+            import httpx
+        except ImportError:
+            return False
+        return isinstance(
+            exc,
+            (
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ConnectError,
+                httpx.WriteError,
+                httpx.PoolTimeout,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            ),
+        )
 
     def _generate_with_retry(self, *, client, model, prompt, config):
         """Wrap ``client.models.generate_content`` with exponential backoff.
@@ -107,13 +142,16 @@ class GeminiProvider(AnswererProvider):
             except Exception as exc:
                 if attempt == _RETRY_ATTEMPTS - 1 or not self._retryable(exc):
                     raise
-                code = getattr(exc, "code", "?")
+                # For API errors print the status code; for httpx
+                # transport errors print the exception class name so
+                # the log distinguishes 503-vs-disconnect failure modes.
+                signal = getattr(exc, "code", None) or type(exc).__name__
                 delay = min(_RETRY_BASE_S * (2 ** attempt), _RETRY_MAX_S)
                 delay *= 1.0 + random.uniform(-0.25, 0.25)
                 _log.warning(
                     "Gemini call %s on model=%s; sleeping %.1fs before retry "
                     "(attempt %d/%d)",
-                    code, model, delay, attempt + 1, _RETRY_ATTEMPTS,
+                    signal, model, delay, attempt + 1, _RETRY_ATTEMPTS,
                 )
                 time.sleep(delay)
         # Unreachable: the loop either returns or raises.

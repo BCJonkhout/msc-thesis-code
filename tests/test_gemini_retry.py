@@ -62,6 +62,40 @@ class TestRetryablePredicate:
         assert provider._retryable(ValueError("nope")) is False
         assert provider._retryable(RuntimeError()) is False
 
+    @pytest.mark.parametrize("exc_name", [
+        "RemoteProtocolError",
+        "ReadError",
+        "ConnectError",
+        "WriteError",
+        "PoolTimeout",
+        "ReadTimeout",
+        "ConnectTimeout",
+    ])
+    def test_httpx_transport_errors_are_retryable(self, provider, exc_name):
+        """Transport-level disconnects (e.g. RemoteProtocolError from
+        an idle pool connection the server closed) bubble through the
+        google-genai SDK without an HTTP status code. Observed in
+        production at the start of each GraphRAG entity-extraction
+        sweep on the NovelQA grid; treating them as retryable
+        absorbed the failure in subsequent runs.
+        """
+        import httpx
+
+        exc_cls = getattr(httpx, exc_name)
+        try:
+            exc = exc_cls("simulated transport error")
+        except TypeError:
+            # Some httpx exceptions require a request kwarg
+            exc = exc_cls("simulated transport error", request=None)
+        assert provider._retryable(exc) is True
+
+    def test_unrelated_httpx_exception_not_retryable(self, provider):
+        """``httpx.InvalidURL`` (a programming error, not transport)
+        must still be non-retryable so genuine bugs surface."""
+        import httpx
+
+        assert provider._retryable(httpx.InvalidURL("bad scheme")) is False
+
 
 class TestRetryLoop:
     def _drive(self, provider, side_effects, monkeypatch):
