@@ -67,8 +67,11 @@ _invoke_with_retry() {
 
 echo "===== NOVELQA LANE $LANE_NAME START ($(date -u +%Y-%m-%dT%H:%M:%SZ)) =====" | tee -a "$DRIVER_LOG"
 
-for triplet in "$@"; do
-  IFS='|' read -r label provider model <<< "$triplet"
+for tuple in "$@"; do
+  # Accept either "label|provider|model" OR
+  # "label|provider|model|resume_run_id" — the optional 4th field
+  # gets passed as --resume-from outputs/runs/<resume_run_id>.
+  IFS='|' read -r label provider model resume_id <<< "$tuple"
 
   # Kimi K2.6 is NovelQA-rejected (configs/models.yaml).
   # Skip with a logged note rather than failing the lane.
@@ -77,14 +80,20 @@ for triplet in "$@"; do
     continue
   fi
 
-  echo "----- $LANE_NAME : $label ($provider / $model) -----" | tee -a "$DRIVER_LOG"
+  resume_flags=""
+  if [ -n "$resume_id" ]; then
+    resume_flags="--resume-from outputs/runs/$resume_id"
+  fi
+
+  echo "----- $LANE_NAME : $label ($provider / $model)${resume_id:+  [resume from $resume_id]} -----" | tee -a "$DRIVER_LOG"
   logfile="$LOG_DIR/pareto_novelqa_${label}.log"
   : > "$logfile"
   summary_flags=$(summary_flags_for "$provider")
   _invoke_with_retry "$label" "$logfile" \
     $DRY_RUN_FLAGS \
     --answerer-provider "$provider" --answerer-model "$model" \
-    $summary_flags
+    $summary_flags \
+    $resume_flags
   echo "  [$label] exit=$?" | tee -a "$DRIVER_LOG"
 done
 
