@@ -15,13 +15,45 @@ Token counts come from `response.usage_metadata`:
 - prompt_token_count          → uncached + cached combined
 - cached_content_token_count  → cached_input_tokens
 - candidates_token_count      → output_tokens
+
+Retry policy
+------------
+The Phase G NovelQA sweep runs three answerer lanes concurrently and
+pins the RAPTOR/GraphRAG summary stage on Gemini Flash Lite for the
+non-Google lanes (multi-provider routing). Under that load Google
+returns:
+
+  - 429 / RESOURCE_EXHAUSTED (rate limit) — already retried inside
+    the SDK transport, surfaces here only after the SDK gives up.
+  - 503 UNAVAILABLE (transient capacity) — *not* retried by the
+    SDK, so a single 503 during a GraphRAG entity-extraction sweep
+    (~350 calls per novel) bubbles up to the dispatcher as a FAIL,
+    wiping the partially-built preprocessing state and forcing a
+    full rebuild on the next question.
+  - 500 INTERNAL — same shape as 503; transient.
+
+We absorb all three with exponential backoff (1s, 2s, 4s, 8s, 16s)
+so the architecture-level FAIL counter only fires on persistent
+errors and the preprocessing build can complete despite transient
+Google-side throttling.
 """
 from __future__ import annotations
 
+import logging
 import os
+import random
 import time
 
 from pilot.providers.base import AnswererProvider, CacheControl, ProviderResult
+
+_log = logging.getLogger(__name__)
+
+# Retryable HTTP status codes. 429: rate limit. 500/502/503/504: server-side
+# transient capacity / upstream issues.
+_RETRYABLE_CODES = {429, 500, 502, 503, 504}
+_RETRY_ATTEMPTS = 5
+_RETRY_BASE_S = 1.0
+_RETRY_MAX_S = 32.0
 
 
 class GeminiProvider(AnswererProvider):
@@ -46,6 +78,46 @@ class GeminiProvider(AnswererProvider):
 
             self._client = genai.Client(api_key=self._api_key)
         return self._client
+
+    @staticmethod
+    def _retryable(exc: Exception) -> bool:
+        """True if ``exc`` is a transient Google API error worth retrying.
+
+        The google-genai SDK raises ``ServerError`` for 5xx and
+        ``ClientError`` for 4xx; both carry an integer ``.code``.
+        Anything else (network exception, JSON parse, etc.) is
+        non-retryable here — the dispatcher will record it as a hard
+        FAIL.
+        """
+        code = getattr(exc, "code", None)
+        return isinstance(code, int) and code in _RETRYABLE_CODES
+
+    def _generate_with_retry(self, *, client, model, prompt, config):
+        """Wrap ``client.models.generate_content`` with exponential backoff.
+
+        Sleeps between attempts: 1, 2, 4, 8, 16 s, each with up to ±25%
+        jitter so concurrent lanes don't synchronise their retries and
+        hit the same 503 window.
+        """
+        for attempt in range(_RETRY_ATTEMPTS):
+            try:
+                return client.models.generate_content(
+                    model=model, contents=prompt, config=config,
+                )
+            except Exception as exc:
+                if attempt == _RETRY_ATTEMPTS - 1 or not self._retryable(exc):
+                    raise
+                code = getattr(exc, "code", "?")
+                delay = min(_RETRY_BASE_S * (2 ** attempt), _RETRY_MAX_S)
+                delay *= 1.0 + random.uniform(-0.25, 0.25)
+                _log.warning(
+                    "Gemini call %s on model=%s; sleeping %.1fs before retry "
+                    "(attempt %d/%d)",
+                    code, model, delay, attempt + 1, _RETRY_ATTEMPTS,
+                )
+                time.sleep(delay)
+        # Unreachable: the loop either returns or raises.
+        raise RuntimeError("retry loop fell through")
 
     def call(
         self,
@@ -88,10 +160,8 @@ class GeminiProvider(AnswererProvider):
         )
 
         start = time.perf_counter()
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=config,
+        response = self._generate_with_retry(
+            client=client, model=model, prompt=prompt, config=config,
         )
         elapsed = time.perf_counter() - start
 
