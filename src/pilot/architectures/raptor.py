@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 # UMAP+GMM clustering inside the vendored RAPTOR repo segfaults on
@@ -307,6 +308,25 @@ _RAPTOR_DEFAULTS = dict(
 )
 
 
+@dataclass
+class _RaptorState:
+    """Per-(run, paper) preprocessing artefact for RAPTOR.
+
+    Built once on the first question for a given paper and reused on
+    every subsequent question. ``ra`` carries the already-constructed
+    UMAP+GMM tree; ``qa_adapter`` is the live adapter whose
+    ``current_options`` slot is mutated per-question to switch between
+    free-form and multiple-choice prompting.
+
+    This is the load-bearing object behind the repeated-context
+    amortisation claim: without it, ``C_off^struct`` would be paid
+    once per question instead of once per document, inverting the
+    cost-vs-quality Pareto and breaking the thesis premise.
+    """
+    ra: object  # raptor.RetrievalAugmentation
+    qa_adapter: "_LedgerQAModel"
+
+
 def run_raptor(
     *,
     document: str,
@@ -320,6 +340,7 @@ def run_raptor(
     run_index: int = 0,
     max_tokens: int = 256,
     summary_answerer: AnswererProvider | None = None,
+    cached_state: _RaptorState | None = None,
 ) -> ArchitectureResult:
     """Build a RAPTOR tree over ``document`` and answer ``query``.
 
@@ -329,56 +350,76 @@ def run_raptor(
     extension protocol: e.g. Grok answerer + Gemini Flash Lite
     summary). When ``summary_answerer`` is ``None`` the summary
     calls go through the same provider as the answerer.
+
+    ``cached_state`` — when provided, skip the tree build entirely and
+    reuse the prior call's ``RetrievalAugmentation``. The cost ledger
+    therefore records the tree-build cost exactly once per
+    (run, paper_id), and every subsequent question on that paper
+    only pays retrieval + answer. This is the on-disk realisation of
+    the ``C_off^struct / n`` amortisation in the cost model
+    (project.tex § 3.4.1).
     """
     summary_model = summary_model or answerer_model
     summary_answerer = summary_answerer or answerer
 
-    embedding_adapter = _LedgerEmbeddingModel(
-        embedder=embedder, ledger=ledger, run_index=run_index
-    )
-    summary_adapter = _LedgerSummarizationModel(
-        answerer=summary_answerer, model=summary_model,
-        ledger=ledger, run_index=run_index,
-    )
-    qa_adapter = _LedgerQAModel(
-        answerer=answerer, model=answerer_model,
-        ledger=ledger, run_index=run_index, max_tokens=max_tokens,
-    )
-    qa_adapter.current_options = options
-
-    tb_cfg = ClusterTreeConfig(
-        max_tokens=_RAPTOR_DEFAULTS["tb_max_tokens"],
-        num_layers=_RAPTOR_DEFAULTS["tb_num_layers"],
-        summarization_length=_RAPTOR_DEFAULTS["tb_summarization_length"],
-        summarization_model=summary_adapter,
-        embedding_models={"EMB": embedding_adapter},
-        cluster_embedding_model="EMB",
-    )
-    tr_cfg = TreeRetrieverConfig(
-        embedding_model=embedding_adapter,
-        context_embedding_model="EMB",
-        top_k=_RAPTOR_DEFAULTS["tr_top_k"],
-        threshold=_RAPTOR_DEFAULTS["tr_threshold"],
-        selection_mode=_RAPTOR_DEFAULTS["tr_selection_mode"],
-    )
-    cfg = RetrievalAugmentationConfig(
-        tree_builder_config=tb_cfg,
-        tree_retriever_config=tr_cfg,
-        qa_model=qa_adapter,
-        embedding_model=embedding_adapter,
-        summarization_model=summary_adapter,
-    )
-    ra = RetrievalAugmentation(config=cfg)
-
-    try:
-        ra.add_documents(document)
-    except Exception as exc:
-        return ArchitectureResult(
-            architecture="raptor",
-            predicted_answer="",
-            failed=True,
-            failure_reason=f"tree_build_failed: {exc!r}",
+    if cached_state is not None:
+        # Cache hit: tree already built on an earlier question for
+        # this paper. Mutate the qa_adapter's current_options slot to
+        # switch between free-form / MC prompting, then retrieve +
+        # answer. No preprocess-stage ledger rows on this path.
+        qa_adapter = cached_state.qa_adapter
+        qa_adapter.current_options = options
+        ra = cached_state.ra
+        state = cached_state
+    else:
+        embedding_adapter = _LedgerEmbeddingModel(
+            embedder=embedder, ledger=ledger, run_index=run_index
         )
+        summary_adapter = _LedgerSummarizationModel(
+            answerer=summary_answerer, model=summary_model,
+            ledger=ledger, run_index=run_index,
+        )
+        qa_adapter = _LedgerQAModel(
+            answerer=answerer, model=answerer_model,
+            ledger=ledger, run_index=run_index, max_tokens=max_tokens,
+        )
+        qa_adapter.current_options = options
+
+        tb_cfg = ClusterTreeConfig(
+            max_tokens=_RAPTOR_DEFAULTS["tb_max_tokens"],
+            num_layers=_RAPTOR_DEFAULTS["tb_num_layers"],
+            summarization_length=_RAPTOR_DEFAULTS["tb_summarization_length"],
+            summarization_model=summary_adapter,
+            embedding_models={"EMB": embedding_adapter},
+            cluster_embedding_model="EMB",
+        )
+        tr_cfg = TreeRetrieverConfig(
+            embedding_model=embedding_adapter,
+            context_embedding_model="EMB",
+            top_k=_RAPTOR_DEFAULTS["tr_top_k"],
+            threshold=_RAPTOR_DEFAULTS["tr_threshold"],
+            selection_mode=_RAPTOR_DEFAULTS["tr_selection_mode"],
+        )
+        cfg = RetrievalAugmentationConfig(
+            tree_builder_config=tb_cfg,
+            tree_retriever_config=tr_cfg,
+            qa_model=qa_adapter,
+            embedding_model=embedding_adapter,
+            summarization_model=summary_adapter,
+        )
+        ra = RetrievalAugmentation(config=cfg)
+
+        try:
+            ra.add_documents(document)
+        except Exception as exc:
+            return ArchitectureResult(
+                architecture="raptor",
+                predicted_answer="",
+                failed=True,
+                failure_reason=f"tree_build_failed: {exc!r}",
+            )
+
+        state = _RaptorState(ra=ra, qa_adapter=qa_adapter)
 
     # Retrieve to capture the evidence sentences (collapsed-tree mode,
     # paper-default 2000-token budget) BEFORE answering, so we can
@@ -409,4 +450,5 @@ def run_raptor(
         architecture="raptor",
         predicted_answer=predicted,
         retrieved_evidence_sentences=evidence_sentences,
+        preprocessing_state=state,
     )

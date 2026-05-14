@@ -311,3 +311,82 @@ class TestSummaryProviderRouting:
         kwargs = stub_dependencies["naive_rag"][0]
         assert "summary_answerer" not in kwargs
         assert "summary_model" not in kwargs
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Preprocessing-state cache threading
+# ──────────────────────────────────────────────────────────────────────
+
+class TestPreprocessingCacheThreading:
+    """RAPTOR + GraphRAG accept an opaque ``cached_state`` carrying the
+    previously-built tree / knowledge-graph for the same paper, so the
+    expensive preprocessing step happens once per paper instead of once
+    per question. This is the on-disk realisation of the
+    ``C_off^struct / n`` amortisation that defines the repeated-context
+    setting in the cost model. Flat / Naive RAG have nothing to cache
+    and must not receive the parameter.
+    """
+
+    def test_raptor_receives_cached_state(self, fake_item, stub_dependencies):
+        sentinel = object()
+        cli._invoke_architecture(
+            "raptor", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=MagicMock(), chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+            cached_state=sentinel,
+        )
+        kwargs = stub_dependencies["raptor"][0]
+        assert kwargs["cached_state"] is sentinel
+
+    def test_graphrag_receives_cached_state(self, fake_item, stub_dependencies):
+        sentinel = object()
+        cli._invoke_architecture(
+            "graphrag", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=MagicMock(), chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+            cached_state=sentinel,
+        )
+        kwargs = stub_dependencies["graphrag"][0]
+        assert kwargs["cached_state"] is sentinel
+
+    def test_raptor_cached_state_defaults_to_none(
+        self, fake_item, stub_dependencies
+    ):
+        cli._invoke_architecture(
+            "raptor", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=MagicMock(), chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+        )
+        kwargs = stub_dependencies["raptor"][0]
+        assert kwargs.get("cached_state") is None
+
+    def test_flat_does_not_receive_cached_state(
+        self, fake_item, stub_dependencies
+    ):
+        cli._invoke_architecture(
+            "flat", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=None, chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+            cached_state=object(),
+        )
+        # Flat has no preprocessing to cache; the runner signature
+        # does not accept cached_state and would TypeError if forwarded.
+        kwargs = stub_dependencies["flat"][0]
+        assert "cached_state" not in kwargs
+
+    def test_naive_rag_does_not_receive_cached_state(
+        self, fake_item, stub_dependencies
+    ):
+        cli._invoke_architecture(
+            "naive_rag", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=MagicMock(), chunker=MagicMock(),
+            ledger=MagicMock(), naive_rag_top_k=8,
+            cached_state=object(),
+        )
+        kwargs = stub_dependencies["naive_rag"][0]
+        assert "cached_state" not in kwargs

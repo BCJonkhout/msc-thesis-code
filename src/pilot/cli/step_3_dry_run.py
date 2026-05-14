@@ -207,7 +207,18 @@ def _invoke_architecture(
     prompt_style: str = "pilot",
     summary_answerer=None,
     summary_model: str | None = None,
+    cached_state: object | None = None,
 ) -> ArchitectureResult:
+    """Dispatch one (architecture, item) call.
+
+    ``cached_state`` carries the prior call's preprocessing artefact
+    for this (architecture, paper_id). For RAPTOR/GraphRAG this means
+    the tree / knowledge-graph built on an earlier question is reused
+    instead of rebuilt — the load-bearing optimisation behind the
+    repeated-context amortisation in the cost model. For
+    flat / naive_rag the parameter is ignored (no preprocessing to
+    cache).
+    """
     if architecture == "flat":
         return run_flat(
             document=item["document"],
@@ -253,6 +264,7 @@ def _invoke_architecture(
             summary_answerer=summary_answerer,
             embedder=embedder,
             ledger=ledger,
+            cached_state=cached_state,
         )
     if architecture == "graphrag":
         if embedder is None:
@@ -267,6 +279,7 @@ def _invoke_architecture(
             summary_answerer=summary_answerer,
             embedder=embedder,
             ledger=ledger,
+            cached_state=cached_state,
         )
     raise ValueError(f"unsupported architecture: {architecture}")
 
@@ -431,14 +444,41 @@ def run_dry_run(
 
     print(f"[step3-dry-run] run_id={run_id} items={len(items)} archs={architectures}", file=sys.stderr)
 
+    # Per-(arch, paper_id) preprocessing-state cache. RAPTOR's tree
+    # and GraphRAG's knowledge graph are built once per paper and
+    # reused across every question on that paper, so the cost ledger
+    # records ``C_off^struct`` exactly once per paper instead of once
+    # per question. This is the on-disk realisation of the
+    # ``C_off^struct / n`` amortisation in the cost model
+    # (project.tex § 3.4.1); without it the per-(method, query) cell
+    # would over-count preprocessing by a factor of n questions per
+    # document, silently inverting the Pareto frontier.
+    #
+    # Eviction: when we move past the last question on a paper, drop
+    # that paper's cache entries to keep the live working set small
+    # on long sweeps. The remaining-paper bag is built once up front
+    # from the input items.
+    preprocessing_cache: dict[tuple[str, str], object] = {}
+    remaining_paper_questions: dict[str, int] = defaultdict(int)
+    for it in items:
+        remaining_paper_questions[it["paper_id"]] += 1
+
     try:
         for item in items:
+            paper_id = item["paper_id"]
             for arch in architectures:
-                tag = f"{arch}/{item['dataset']}/{item['paper_id']}/{item['question_id']}"
-                key = (arch, item["paper_id"], item["question_id"])
+                tag = f"{arch}/{item['dataset']}/{paper_id}/{item['question_id']}"
+                key = (arch, paper_id, item["question_id"])
                 if key in completed:
                     print(f"[step3-dry-run] SKIP {tag} (already in resume_from)", file=sys.stderr)
                     continue
+                cache_key = (arch, paper_id)
+                cached_state = preprocessing_cache.get(cache_key)
+                if cached_state is not None and arch in {"raptor", "graphrag"}:
+                    print(
+                        f"[step3-dry-run] HIT  {tag} preprocessing cached",
+                        file=sys.stderr,
+                    )
                 try:
                     result = _invoke_architecture(
                         arch,
@@ -452,6 +492,7 @@ def run_dry_run(
                         prompt_style=prompt_style,
                         summary_answerer=summary_answerer,
                         summary_model=summary_model,
+                        cached_state=cached_state,
                     )
                 except Exception as exc:
                     failures.append({
@@ -464,6 +505,14 @@ def run_dry_run(
                     })
                     print(f"[step3-dry-run] FAIL {tag}: {exc!r}", file=sys.stderr)
                     continue
+
+                # Cache the preprocessing artefact for future questions
+                # on this paper. Only RAPTOR/GraphRAG return a non-None
+                # preprocessing_state; flat / naive_rag have nothing to
+                # cache. Stored under (arch, paper_id) so two
+                # architectures on the same paper don't collide.
+                if result.preprocessing_state is not None:
+                    preprocessing_cache[cache_key] = result.preprocessing_state
 
                 scores = _score_item(item, result)
                 row = {
@@ -501,6 +550,27 @@ def run_dry_run(
                     ),
                     file=sys.stderr,
                 )
+
+            # After all architectures have been invoked for this
+            # item, decrement the remaining-question counter for the
+            # paper. When it hits zero this paper is fully processed
+            # and its cached preprocessing artefacts (potentially
+            # several hundred MB for GraphRAG on a 90k-token novel)
+            # can be released. With the item-major iteration order the
+            # calibration loaders produce, this evicts each paper's
+            # cache once and keeps the live working set to ~one paper
+            # per architecture.
+            remaining_paper_questions[paper_id] -= 1
+            if remaining_paper_questions[paper_id] <= 0:
+                evicted = [k for k in preprocessing_cache if k[1] == paper_id]
+                for k in evicted:
+                    del preprocessing_cache[k]
+                if evicted:
+                    print(
+                        f"[step3-dry-run] EVICT preprocessing cache for paper_id={paper_id} "
+                        f"({len(evicted)} arch entries)",
+                        file=sys.stderr,
+                    )
     finally:
         for fh in pred_files.values():
             fh.close()

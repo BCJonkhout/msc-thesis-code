@@ -38,6 +38,14 @@ class ArchitectureResult:
     response_token_count: int | None = None
     failed: bool = False
     failure_reason: str | None = None
+    # Opaque per-architecture preprocessing artefact (RAPTOR tree,
+    # GraphRAG knowledge graph + community reports, ...). The dispatcher
+    # caches this per-(architecture, paper_id) and threads it back into
+    # the next call on the same paper so RAPTOR + GraphRAG don't pay
+    # the build cost N times when the calibration pool has N questions
+    # on the same document. None for architectures with no preprocessing
+    # (flat, naive_rag).
+    preprocessing_state: object | None = None
 
 
 def _format_options_block(options: dict[str, str] | None) -> str:

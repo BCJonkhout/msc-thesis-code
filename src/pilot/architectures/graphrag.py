@@ -243,6 +243,37 @@ class _CommunityReport:
     rank: int          # community size (proxy for Microsoft's rank attribute)
 
 
+@dataclass
+class _GraphRAGState:
+    """Per-(run, paper) preprocessing artefact for GraphRAG.
+
+    Carries the full output of steps 1–4 (chunking, entity extraction
+    with gleaning, graph build + Louvain communities, per-community
+    structured reports) PLUS the entity-description embeddings (step
+    4.5), so subsequent questions on the same paper only pay the
+    query-embed + local-search-pack + answerer cost. Without this
+    cache the ledger over-attributes ``C_off^struct`` by a factor of N
+    (questions per document), which would silently break the
+    repeated-context amortisation that motivates the whole study.
+
+    Entity-description embeddings are stored here (rather than
+    recomputed inside ``_local_search_build_context`` on every
+    question) because they are conceptually part of the index
+    build — Microsoft graphrag persists them to a vector store at
+    indexing time — and re-embedding them per question would both
+    waste wall-clock (hundreds of redundant BGE-M3 calls per paper)
+    and mis-attribute index-build cost to per-query retrieval.
+    """
+    chunks: list[str]
+    entities: list["_Entity"]
+    relationships: list["_Relationship"]
+    g: object  # NetworkX Graph
+    communities: list[set[str]]
+    reports: list["_CommunityReport"]
+    entity_vecs: list[list[float]]
+    embed_dim: int | None
+
+
 # ──────────────────────────────────────────────────────────────────────
 # JSON parsing helpers
 # ──────────────────────────────────────────────────────────────────────
@@ -546,6 +577,104 @@ def _pack_within_budget(
     return out
 
 
+# Heavily-mentioned entities accumulate concatenated descriptions
+# across every chunk they appear in; for a long document with many
+# chunks an entity description can grow to several thousand
+# characters. Truncate each entity-text to a generous prefix — the
+# embedding signal is preserved without sending the entire
+# multi-thousand-character concatenation through Ollama.
+_ENT_DESC_CHAR_CAP = 1000
+
+
+def _safe_embed_many(
+    texts: list[str],
+    *,
+    embedder: OllamaEmbedder,
+    ledger: CostLedger,
+    run_index: int,
+    stage: Stage,
+) -> tuple[list[list[float]], int | None]:
+    """Embed ``texts`` one-at-a-time with BGE-M3 NaN-skip backfill.
+
+    Logs the whole call as a single ledger row with the caller-chosen
+    stage. Returns ``(vectors, embed_dim)``. Vectors of failed inputs
+    are zero-filled to ``embed_dim`` so downstream cosine ranking
+    treats them as unranked rather than length-mismatching.
+
+    BGE-M3 served by Ollama occasionally produces NaN values for
+    short / sparse / formatting-only inputs; the server then 500s the
+    WHOLE batch because Go's JSON encoder rejects NaN. Per-input
+    embedding plus zero-vector backfill keeps a single bad string
+    from killing the document.
+    """
+    import httpx  # local import keeps the top-level dependency surface unchanged
+
+    all_vectors: list[list[float]] = []
+    embed_dim: int | None = None
+    with ledger.log_call(
+        architecture="graphrag",
+        stage=stage,
+        model=embedder.model,
+        prompt="\n\n".join(texts),
+        run_index=run_index,
+    ) as rec:
+        for text in texts:
+            try:
+                r = embedder.embed([text])
+                vec = r.embeddings[0] if r.embeddings else []
+                if vec:
+                    embed_dim = embed_dim or len(vec)
+                all_vectors.append(vec or [])
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 500:
+                    all_vectors.append([])
+                else:
+                    raise
+        if embed_dim is not None:
+            all_vectors = [
+                v if v else [0.0] * embed_dim
+                for v in all_vectors
+            ]
+        rec.uncached_input_tokens = max(
+            1, sum(len(t) for t in texts) // 4
+        )
+        rec.cached_input_tokens = 0
+        rec.output_tokens = 0
+        rec.response_hash = sha256_hex(
+            "|".join(f"{v[0]:.6f}" for v in all_vectors if v)
+        )
+    return all_vectors, embed_dim
+
+
+def _embed_entity_descriptions(
+    entities: list[_Entity],
+    *,
+    embedder: OllamaEmbedder,
+    ledger: CostLedger,
+    run_index: int,
+) -> tuple[list[list[float]], int | None]:
+    """Embed every entity description once per paper.
+
+    Logged as ``stage=preprocess`` because — like the per-chunk
+    extraction and per-community summarisation — these embeddings are
+    part of the index build and are reused across every question on
+    this paper. Microsoft graphrag persists them to a vector store at
+    indexing time; we keep them in-memory inside the cached
+    ``_GraphRAGState``.
+    """
+    entity_texts = [
+        f"{e.name}: {e.description[:_ENT_DESC_CHAR_CAP]}"
+        for e in entities
+    ]
+    if not entity_texts:
+        return [], None
+    return _safe_embed_many(
+        entity_texts,
+        embedder=embedder, ledger=ledger,
+        run_index=run_index, stage=Stage.PREPROCESS,
+    )
+
+
 def _local_search_build_context(
     *,
     query: str,
@@ -555,6 +684,8 @@ def _local_search_build_context(
     communities: list[set[str]],
     reports: list[_CommunityReport],
     chunks: list[str],
+    entity_vecs: list[list[float]],
+    embed_dim: int | None,
     embedder: OllamaEmbedder,
     ledger: CostLedger,
     run_index: int,
@@ -564,6 +695,10 @@ def _local_search_build_context(
 ) -> tuple[str, list[str]]:
     """Build the local-search context for the answerer.
 
+    Entity-description vectors are passed in precomputed (built once
+    per paper during preprocessing). The only per-question embed call
+    is the query itself, logged as ``stage=retrieval``.
+
     Returns ``(packed_context, evidence_sentences)``. The
     evidence_sentences list is a flat list of human-readable strings
     pulled into the context, used by the architecture-level
@@ -572,82 +707,27 @@ def _local_search_build_context(
     if not entities:
         return "(no entities extracted)", []
 
-    # 1. Embed query + every entity description.
-    #
-    # Heavily-mentioned entities accumulate concatenated descriptions
-    # across every chunk they appear in; for a long document with
-    # many chunks an entity description can grow to several thousand
-    # characters. Truncate each entity-text to a generous prefix —
-    # the embedding signal is preserved without sending the entire
-    # multi-thousand-character concatenation through Ollama.
-    _ENT_DESC_CHAR_CAP = 1000
-    entity_texts = [
-        f"{e.name}: {e.description[:_ENT_DESC_CHAR_CAP]}"
-        for e in entities
-    ]
-    embed_payload = [query] + entity_texts
-
-    # BGE-M3 served by Ollama occasionally produces NaN values in
-    # embedding vectors for short / sparse / formatting-only inputs;
-    # the server then returns 500 on the WHOLE batch because Go's
-    # JSON encoder rejects NaN. Embed each input individually so a
-    # single bad entity doesn't kill the document. Skip entries that
-    # 500 by substituting a zero vector — they sort to the bottom of
-    # cosine ranking and are effectively excluded from local-search
-    # retrieval without aborting the whole architecture run.
-    import httpx  # local import keeps the top-level dependency surface unchanged
-    all_vectors: list[list[float]] = []
-    skipped = 0
-    embed_dim: int | None = None
-    with ledger.log_call(
-        architecture="graphrag",
-        stage=Stage.RETRIEVAL,
-        model=embedder.model,
-        prompt="\n\n".join(embed_payload),
-        run_index=run_index,
-    ) as rec:
-        for text in embed_payload:
-            try:
-                r = embedder.embed([text])
-                vec = r.embeddings[0] if r.embeddings else []
-                if vec:
-                    embed_dim = embed_dim or len(vec)
-                all_vectors.append(vec or [])
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 500:
-                    skipped += 1
-                    all_vectors.append([])  # dim resolved on first success
-                else:
-                    raise
-        # Backfill zero vectors for the BGE-M3 NaN skips so the
-        # downstream cosine sort treats them as unranked rather than
-        # crashing on length mismatch.
-        if embed_dim is not None:
-            all_vectors = [
-                v if v else [0.0] * embed_dim
-                for v in all_vectors
-            ]
-        elif all_vectors:
-            # Pathological case: every input produced NaN. Bail out
-            # gracefully rather than computing similarity on empty
-            # vectors.
-            return (
-                "(local-search embedding failed: every entity description"
-                " produced NaN on the BGE-M3 server)",
-                [],
-            )
-        rec.uncached_input_tokens = max(
-            1, sum(len(t) for t in embed_payload) // 4
+    # Query embedding only — entity embeddings are already in
+    # ``entity_vecs`` from preprocessing.
+    query_vectors, _q_dim = _safe_embed_many(
+        [query], embedder=embedder, ledger=ledger,
+        run_index=run_index, stage=Stage.RETRIEVAL,
+    )
+    if not query_vectors or not query_vectors[0]:
+        # Pathological: query failed to embed. Bail out gracefully.
+        return (
+            "(local-search embedding failed: query produced NaN on the"
+            " BGE-M3 server)",
+            [],
         )
-        rec.cached_input_tokens = 0
-        rec.output_tokens = 0
-        rec.response_hash = sha256_hex(
-            "|".join(
-                f"{v[0]:.6f}" for v in all_vectors if v
-            )
+    query_vec = query_vectors[0]
+    if embed_dim is None:
+        # Pathological case: every entity produced NaN at build time.
+        return (
+            "(local-search embedding failed: every entity description"
+            " produced NaN on the BGE-M3 server)",
+            [],
         )
-    query_vec = all_vectors[0]
-    entity_vecs = all_vectors[1:]
 
     # 2. Top-k entities by query-entity-description cosine.
     scores = [_cosine(query_vec, v) for v in entity_vecs]
@@ -764,6 +844,7 @@ def run_graphrag(
     max_tokens: int = 256,
     summary_model: str | None = None,
     summary_answerer: AnswererProvider | None = None,
+    cached_state: _GraphRAGState | None = None,
 ) -> ArchitectureResult:
     """Run the faithful GraphRAG local-search pipeline.
 
@@ -776,54 +857,96 @@ def run_graphrag(
     call (Phase F extension protocol: e.g. Grok final answer +
     Gemini Flash Lite preprocessing). When ``None`` the summary
     stage uses the same provider as the answerer.
+
+    ``cached_state`` — when provided, skip steps 1–4 (chunking, entity
+    extraction with gleaning, graph + Louvain, community reports) and
+    reuse the prior call's artefacts. Only the per-query local-search
+    embedding pass and the final answerer call land in the ledger on
+    this path. This is the on-disk realisation of the
+    ``C_off^struct / n`` amortisation in the cost model
+    (project.tex § 3.4.1); without it, the build cost would be paid
+    once per question instead of once per document and the Pareto
+    comparison against flat full-context would be invalid.
     """
     summary_model = summary_model or answerer_model
     summary_answerer = summary_answerer or answerer
 
-    # 1. Chunk.
-    chunker = SentenceBoundaryChunker(
-        chunk_size_tokens=_CHUNK_TOKENS, overlap_tokens=_CHUNK_OVERLAP_TOKENS
-    )
-    chunks = [c.text for c in chunker.chunk(document)]
-    if not chunks:
-        return ArchitectureResult(
-            architecture="graphrag",
-            predicted_answer="",
-            failed=True,
-            failure_reason="document_produced_no_chunks",
+    if cached_state is not None:
+        chunks = cached_state.chunks
+        entities = cached_state.entities
+        relationships = cached_state.relationships
+        g = cached_state.g
+        communities = cached_state.communities
+        reports = cached_state.reports
+        entity_vecs = cached_state.entity_vecs
+        embed_dim = cached_state.embed_dim
+        state = cached_state
+    else:
+        # 1. Chunk.
+        chunker = SentenceBoundaryChunker(
+            chunk_size_tokens=_CHUNK_TOKENS, overlap_tokens=_CHUNK_OVERLAP_TOKENS
+        )
+        chunks = [c.text for c in chunker.chunk(document)]
+        if not chunks:
+            return ArchitectureResult(
+                architecture="graphrag",
+                predicted_answer="",
+                failed=True,
+                failure_reason="document_produced_no_chunks",
+            )
+
+        # 2. Extract entities + relationships (with one gleaning pass).
+        entities, relationships = _extract_entities_per_chunk(
+            chunks,
+            answerer=summary_answerer, answerer_model=summary_model,
+            ledger=ledger, run_index=run_index,
+        )
+        if not entities:
+            return ArchitectureResult(
+                architecture="graphrag",
+                predicted_answer="",
+                failed=True,
+                failure_reason="no_entities_extracted",
+            )
+
+        # 3. Build graph + communities.
+        g, communities, _edge_tu = _build_graph_and_communities(
+            entities, relationships,
         )
 
-    # 2. Extract entities + relationships (with one gleaning pass).
-    entities, relationships = _extract_entities_per_chunk(
-        chunks,
-        answerer=summary_answerer, answerer_model=summary_model,
-        ledger=ledger, run_index=run_index,
-    )
-    if not entities:
-        return ArchitectureResult(
-            architecture="graphrag",
-            predicted_answer="",
-            failed=True,
-            failure_reason="no_entities_extracted",
+        # 4. Per-community structured reports.
+        reports = _summarise_communities(
+            g, communities,
+            answerer=summary_answerer, answerer_model=summary_model,
+            ledger=ledger, run_index=run_index,
         )
 
-    # 3. Build graph + communities.
-    g, communities, _edge_tu = _build_graph_and_communities(
-        entities, relationships,
-    )
+        # 4.5. Embed every entity description once. Logged as
+        # ``stage=preprocess`` (part of the index build), reused
+        # across every question on this paper.
+        entity_vecs, embed_dim = _embed_entity_descriptions(
+            entities,
+            embedder=embedder, ledger=ledger, run_index=run_index,
+        )
 
-    # 4. Per-community structured reports.
-    reports = _summarise_communities(
-        g, communities,
-        answerer=summary_answerer, answerer_model=summary_model,
-        ledger=ledger, run_index=run_index,
-    )
+        state = _GraphRAGState(
+            chunks=chunks,
+            entities=entities,
+            relationships=relationships,
+            g=g,
+            communities=communities,
+            reports=reports,
+            entity_vecs=entity_vecs,
+            embed_dim=embed_dim,
+        )
 
-    # 5. Local search builds the packed context.
+    # 5. Local search builds the packed context (per-query: embeds
+    # the query and packs context against the cached entity vectors).
     context, evidence = _local_search_build_context(
         query=query,
         g=g, entities=entities, relationships=relationships,
         communities=communities, reports=reports, chunks=chunks,
+        entity_vecs=entity_vecs, embed_dim=embed_dim,
         embedder=embedder, ledger=ledger, run_index=run_index,
     )
 
@@ -857,4 +980,5 @@ def run_graphrag(
         retrieved_evidence_sentences=evidence,
         prompt_token_count=result.uncached_input_tokens + result.cached_input_tokens,
         response_token_count=result.output_tokens,
+        preprocessing_state=state,
     )
