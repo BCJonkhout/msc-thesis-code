@@ -219,12 +219,60 @@ class TestPreprocessingCache:
         assert invocations[1]["cached_state"] == {"graph": "built"}
         assert invocations[2]["cached_state"] == {"graph": "built"}
 
+    def test_naive_rag_chunk_index_amortises(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Naive RAG must build the chunk-embed index once per paper.
+
+        The cost model in project.tex §3.4.1 separates ``C_off^struct``
+        (build cost, paid once per paper) from ``C_on`` (per-question
+        retrieval + generate). An earlier iteration of naive_rag
+        chunk-embedded the whole document on every question, which
+        meant build cost was inappropriately billed to per-question
+        retrieval and the Pareto comparison against RAPTOR/GraphRAG
+        was biased against naive_rag.
+        """
+        data_root = tmp_path / "data"
+        _write_qasper_pool(data_root, [("paperA", ["q1", "q2", "q3"])])
+
+        invocations: list[dict[str, Any]] = []
+        first_state = object()
+
+        def fake_run_naive_rag(**kwargs):
+            invocations.append({"cached_state": kwargs.get("cached_state")})
+            state = kwargs.get("cached_state") or first_state
+            return ArchitectureResult(
+                architecture="naive_rag", predicted_answer="z",
+                preprocessing_state=state,
+            )
+
+        monkeypatch.setattr(cli, "run_naive_rag", fake_run_naive_rag)
+        monkeypatch.setattr(cli, "get_provider", lambda name: MagicMock())
+
+        cli.run_dry_run(
+            architectures=["naive_rag"],
+            datasets=["qasper"],
+            answerer_provider="gemini",
+            answerer_model="m",
+            embedder_model="bge-m3",
+            naive_rag_top_k=8,
+            data_root=data_root,
+            out_dir=tmp_path / "out",
+        )
+
+        assert len(invocations) == 3
+        # First question: cache miss → build chunk index
+        assert invocations[0]["cached_state"] is None
+        # Subsequent questions: same paper → HIT with the cached index
+        assert invocations[1]["cached_state"] is first_state
+        assert invocations[2]["cached_state"] is first_state
+
     def test_flat_runner_never_sees_cached_state_kwarg(
         self, tmp_path: Path, monkeypatch
     ):
         """Flat has no preprocessing to cache; its runner signature
         does not accept cached_state and would TypeError if the
-        dispatcher tried to forward it. Same for naive_rag."""
+        dispatcher tried to forward it."""
         data_root = tmp_path / "data"
         _write_qasper_pool(data_root, [("paperA", ["q1", "q2"])])
 

@@ -378,15 +378,27 @@ class TestPreprocessingCacheThreading:
         kwargs = stub_dependencies["flat"][0]
         assert "cached_state" not in kwargs
 
-    def test_naive_rag_does_not_receive_cached_state(
+    def test_naive_rag_receives_cached_state(
         self, fake_item, stub_dependencies
     ):
+        """Naive RAG amortises its chunk-embedding index across
+        questions on a paper, same pattern as RAPTOR/GraphRAG. The
+        dispatcher must thread cached_state through to the runner.
+
+        An earlier dispatcher iteration excluded naive_rag from the
+        cache pathway, with the consequence that naive_rag's chunk-
+        index build (~250 BGE-M3 calls for a NovelQA novel) was paid
+        every question instead of every paper — inflating its per-
+        question cost ~5x and systematically biasing the Pareto
+        frontier against it.
+        """
+        sentinel = object()
         cli._invoke_architecture(
             "naive_rag", fake_item,
             answerer=MagicMock(), answerer_model="m",
             embedder=MagicMock(), chunker=MagicMock(),
             ledger=MagicMock(), naive_rag_top_k=8,
-            cached_state=object(),
+            cached_state=sentinel,
         )
         kwargs = stub_dependencies["naive_rag"][0]
-        assert "cached_state" not in kwargs
+        assert kwargs["cached_state"] is sentinel

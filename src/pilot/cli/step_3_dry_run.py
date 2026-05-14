@@ -212,12 +212,14 @@ def _invoke_architecture(
     """Dispatch one (architecture, item) call.
 
     ``cached_state`` carries the prior call's preprocessing artefact
-    for this (architecture, paper_id). For RAPTOR/GraphRAG this means
-    the tree / knowledge-graph built on an earlier question is reused
-    instead of rebuilt — the load-bearing optimisation behind the
-    repeated-context amortisation in the cost model. For
-    flat / naive_rag the parameter is ignored (no preprocessing to
-    cache).
+    for this (architecture, paper_id). For Naive RAG it's the cached
+    chunk-embed index; for RAPTOR the built tree; for GraphRAG the
+    extracted entity graph + community reports + entity vectors. In
+    every case this is the load-bearing optimisation behind the
+    repeated-context amortisation in the cost model — build cost is
+    paid once per (run, paper, arch), per-question cost stays
+    proportional to retrieval + answer only. For ``flat`` the
+    parameter is ignored (no preprocessing).
     """
     if architecture == "flat":
         return run_flat(
@@ -245,6 +247,7 @@ def _invoke_architecture(
             top_k=naive_rag_top_k,
             cache_control=CacheControl.EPHEMERAL_5MIN,
             prompt_style=prompt_style,
+            cached_state=cached_state,
         )
     if architecture == "raptor":
         if embedder is None:
@@ -474,7 +477,7 @@ def run_dry_run(
                     continue
                 cache_key = (arch, paper_id)
                 cached_state = preprocessing_cache.get(cache_key)
-                if cached_state is not None and arch in {"raptor", "graphrag"}:
+                if cached_state is not None and arch in {"naive_rag", "raptor", "graphrag"}:
                     print(
                         f"[step3-dry-run] HIT  {tag} preprocessing cached",
                         file=sys.stderr,

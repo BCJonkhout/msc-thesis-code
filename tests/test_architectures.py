@@ -168,7 +168,13 @@ class TestRunFlat:
 # ──────────────────────────────────────────────────────────────────────
 
 class TestRunNaiveRag:
-    def test_writes_two_ledger_rows_one_retrieval_one_generate(self, tmp_path: Path):
+    def test_writes_three_ledger_rows_preprocess_retrieval_generate(self, tmp_path: Path):
+        """First-question invocation writes three rows: the chunk-
+        embed build (PREPROCESS, paid once per paper), the query
+        embed (RETRIEVAL, paid every question), and the answerer
+        call (GENERATE). The build/query split is what makes
+        ``C_off^struct`` distinguishable from ``C_on`` in the cost
+        model, which the break-even analysis depends on."""
         answerer = _StubAnswerer(response_text="Naive answer")
         embedder = _StubEmbedder()
         chunker = SentenceBoundaryChunker(chunk_size_tokens=64, overlap_tokens=0)
@@ -190,14 +196,55 @@ class TestRunNaiveRag:
             top_k=4,
         )
         rows = ledger.read()
-        assert len(rows) == 2
+        assert len(rows) == 3
         stages = sorted(r.stage for r in rows)
-        assert stages == ["generate", "retrieval"]
+        assert stages == ["generate", "preprocess", "retrieval"]
         archs = {r.architecture for r in rows}
         assert archs == {"naive_rag"}
         assert result.predicted_answer == "Naive answer"
         # top_k=4 should produce exactly 4 retrieved chunk texts.
         assert len(result.retrieved_evidence_sentences) == 4
+        # preprocessing_state must be populated so the dispatcher can
+        # cache the chunk-embed index for subsequent questions.
+        assert result.preprocessing_state is not None
+
+    def test_cache_hit_skips_chunk_embed_writes_two_rows(self, tmp_path: Path):
+        """On a cache hit, only retrieval (query embed) + generate
+        land in the ledger — the chunk-embed PREPROCESS row was
+        already paid on the first question for this paper."""
+        answerer = _StubAnswerer(response_text="cached answer")
+        embedder = _StubEmbedder()
+        chunker = SentenceBoundaryChunker(chunk_size_tokens=64, overlap_tokens=0)
+        ledger = CostLedger(run_id="test-rag-cache", root=tmp_path)
+
+        document = " ".join(
+            f"Sentence number {i} talks about topic {i % 3}." for i in range(20)
+        )
+        first = run_naive_rag(
+            document=document, query="q1", options=None,
+            answerer=answerer, answerer_model="m",
+            embedder=embedder, chunker=chunker, ledger=ledger,
+            top_k=4,
+        )
+        assert first.preprocessing_state is not None
+        rows_after_first = len(ledger.read())
+
+        second = run_naive_rag(
+            document=document, query="q2", options=None,
+            answerer=answerer, answerer_model="m",
+            embedder=embedder, chunker=chunker, ledger=ledger,
+            top_k=4,
+            cached_state=first.preprocessing_state,
+        )
+        rows_after_second = ledger.read()
+        new_rows = rows_after_second[rows_after_first:]
+        assert len(new_rows) == 2
+        new_stages = sorted(r.stage for r in new_rows)
+        assert new_stages == ["generate", "retrieval"]
+        # The second invocation must have reused the cached state, not
+        # produced a fresh one. preprocessing_state identity is the
+        # contract the dispatcher relies on.
+        assert second.preprocessing_state is first.preprocessing_state
 
     def test_top_k_caps_retrieved_evidence(self, tmp_path: Path):
         answerer = _StubAnswerer()
@@ -233,9 +280,13 @@ class TestRunNaiveRag:
         # Answerer never called.
         assert answerer.calls == []
 
-    def test_embedding_payload_includes_question(self, tmp_path: Path):
-        """The retrieval-stage embed call must include the query so
-        cosine ranking has something to compare against."""
+    def test_query_embedded_in_separate_retrieval_call(self, tmp_path: Path):
+        """The query embedding must land in its own embed call (one
+        per question, ``Stage.RETRIEVAL``), not bundled with the
+        chunk-embed build (``Stage.PREPROCESS``). Without this split
+        the per-question retrieval cost is overcounted by the
+        chunk-embed contribution.
+        """
         answerer = _StubAnswerer()
         embedder = _StubEmbedder()
         chunker = SentenceBoundaryChunker(chunk_size_tokens=64, overlap_tokens=0)
@@ -249,10 +300,13 @@ class TestRunNaiveRag:
             embedder=embedder, chunker=chunker, ledger=ledger,
             top_k=2,
         )
-        # The last item in the embed batch is the question.
-        assert embedder.calls
-        embed_inputs = embedder.calls[0]
-        assert embed_inputs[-1] == "UNIQUE_QUERY_TOKEN"
+        # The embedder receives two separate batches:
+        #   batch 0 = chunk texts (no query)
+        #   batch 1 = [query]
+        assert len(embedder.calls) == 2
+        chunk_batch, query_batch = embedder.calls
+        assert "UNIQUE_QUERY_TOKEN" not in chunk_batch
+        assert query_batch == ["UNIQUE_QUERY_TOKEN"]
 
     def test_ledger_rows_share_prompt_hash_with_call(self, tmp_path: Path):
         """The prompt_hash on the GENERATE row must equal sha256 of

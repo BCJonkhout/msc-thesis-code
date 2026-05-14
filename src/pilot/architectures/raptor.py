@@ -77,7 +77,32 @@ from raptor import (  # noqa: E402  (import order: must follow sys.path tweak)
 # ──────────────────────────────────────────────────────────────────────
 
 class _LedgerEmbeddingModel(BaseEmbeddingModel):
-    """Adapter routing every embed call through ``CostLedger``."""
+    """Adapter routing every embed call through ``CostLedger``.
+
+    The same adapter instance is wired into BOTH the tree-builder
+    (which embeds every leaf chunk and every internal-cluster node
+    during ``ra.add_documents()``) AND the query-time TreeRetriever
+    (which embeds the query against the prebuilt tree). The two phases
+    must land in DIFFERENT cost buckets:
+
+      - Build-phase embeddings are paid once per (paper, arch) and
+        belong to ``C_off^struct`` → ``Stage.PREPROCESS``.
+      - Query-phase embeddings are paid per question and belong to
+        ``C_on`` → ``Stage.RETRIEVAL``.
+
+    The ``stage`` attribute is mutable: ``run_raptor`` sets it to
+    ``Stage.PREPROCESS`` before invoking ``add_documents`` and flips
+    it to ``Stage.RETRIEVAL`` immediately after, before any retrieve
+    call. On cache-hit paths the cached adapter already has
+    ``stage = RETRIEVAL`` from the build that populated it.
+
+    Cost-model rationale (project.tex §3.4.1): the break-even analysis
+    against flat full-context requires a clean separation between
+    offline build cost and online per-query cost; lumping
+    ~1000 tree-build embeds into per-query RETRIEVAL keeps the
+    *total* amortised cost correct but inverts the offline/online
+    split, which is what break-even depends on.
+    """
 
     def __init__(
         self,
@@ -85,10 +110,12 @@ class _LedgerEmbeddingModel(BaseEmbeddingModel):
         embedder: OllamaEmbedder,
         ledger: CostLedger,
         run_index: int = 0,
+        stage: Stage = Stage.PREPROCESS,
     ) -> None:
         self.embedder = embedder
         self.ledger = ledger
         self.run_index = run_index
+        self.stage = stage
 
     def create_embedding(self, text):
         # Ollama's /api/embed accepts a list; we send a 1-element batch.
@@ -97,7 +124,7 @@ class _LedgerEmbeddingModel(BaseEmbeddingModel):
         # naive_rag for fair cross-architecture cost comparison).
         with self.ledger.log_call(
             architecture="raptor",
-            stage=Stage.RETRIEVAL,
+            stage=self.stage,
             model=self.embedder.model,
             prompt=text,
             run_index=self.run_index,
@@ -366,14 +393,18 @@ def run_raptor(
         # Cache hit: tree already built on an earlier question for
         # this paper. Mutate the qa_adapter's current_options slot to
         # switch between free-form / MC prompting, then retrieve +
-        # answer. No preprocess-stage ledger rows on this path.
+        # answer. No preprocess-stage ledger rows on this path — the
+        # embedding adapter inside ``ra`` already had its stage
+        # flipped to RETRIEVAL at the end of the build that populated
+        # this cache entry.
         qa_adapter = cached_state.qa_adapter
         qa_adapter.current_options = options
         ra = cached_state.ra
         state = cached_state
     else:
         embedding_adapter = _LedgerEmbeddingModel(
-            embedder=embedder, ledger=ledger, run_index=run_index
+            embedder=embedder, ledger=ledger, run_index=run_index,
+            stage=Stage.PREPROCESS,
         )
         summary_adapter = _LedgerSummarizationModel(
             answerer=summary_answerer, model=summary_model,
@@ -410,6 +441,10 @@ def run_raptor(
         ra = RetrievalAugmentation(config=cfg)
 
         try:
+            # Build phase: every leaf-chunk + internal-cluster embed
+            # goes through ``embedding_adapter`` and lands in the
+            # ledger as ``Stage.PREPROCESS`` (the adapter was
+            # instantiated with that stage above).
             ra.add_documents(document)
         except Exception as exc:
             return ArchitectureResult(
@@ -418,6 +453,13 @@ def run_raptor(
                 failed=True,
                 failure_reason=f"tree_build_failed: {exc!r}",
             )
+
+        # Build complete — flip the adapter's stage so subsequent
+        # query-time embed calls (TreeRetriever embedding the user
+        # query against the prebuilt tree) land as ``RETRIEVAL`` per
+        # the cost model. This adapter instance is what every cache
+        # hit on this paper will use.
+        embedding_adapter.stage = Stage.RETRIEVAL
 
         state = _RaptorState(ra=ra, qa_adapter=qa_adapter)
 
