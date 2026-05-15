@@ -45,34 +45,64 @@ def _provider_for_model(price_card: dict[str, Any], model_id: str) -> tuple[str,
 
 
 def _row_cost_usd(row: CallRecord, price_card: dict[str, Any]) -> float:
-    """Compute the USD cost of a single ledger row."""
+    """Compute the USD cost of a single ledger row.
+
+    Two paths:
+
+    1. **Closed-API row** — the row's model resolves to a provider in
+       the price card; cost = token-based rate.
+    2. **Local-equivalent row** — the row's model is not in the price
+       card (e.g. ``bge-m3`` served by Ollama). We charge GPU wall-
+       clock at the locked H100 rate per ``configs/price_card.yaml#gpu``,
+       so the cost model in project.tex §3.4.1 ("Resource ledger" +
+       "Price model") is honoured for open-weights / local-compute
+       calls instead of being silently zeroed.
+
+    The ``gpu_s_estimate`` ledger field overrides ``wallclock_s`` when
+    populated (Ollama / vLLM should set it explicitly when GPU
+    utilisation is available); otherwise wallclock_s is used as the
+    conservative upper bound — local model serving is GPU-bound and
+    the client-side overhead is negligible vs. a multi-second BGE-M3
+    or chunk-embed batch.
+    """
     if row.failed:
         return 0.0
     found = _provider_for_model(price_card, row.model)
-    if found is None:
-        return 0.0
-    _provider, rates = found
+    if found is not None:
+        _provider, rates = found
+        # Simple rate selection: prefer flat rates, fall back to
+        # below-tier rates.
+        in_uncached = (
+            rates.get("input_uncached")
+            or rates.get("input_uncached_below_200k")
+            or rates.get("input_uncached_below_272k")
+            or 0.0
+        )
+        in_cached = rates.get("input_cached_read", 0.0)
+        out = (
+            rates.get("output")
+            or rates.get("output_below_200k")
+            or rates.get("output_below_272k")
+            or 0.0
+        )
+        return (
+            row.uncached_input_tokens * in_uncached
+            + row.cached_input_tokens * in_cached
+            + row.output_tokens * out
+        ) / 1_000_000
 
-    # Simple rate selection: prefer flat rates, fall back to below-tier rates.
-    in_uncached = (
-        rates.get("input_uncached")
-        or rates.get("input_uncached_below_200k")
-        or rates.get("input_uncached_below_272k")
-        or 0.0
-    )
-    in_cached = rates.get("input_cached_read", 0.0)
-    out = (
-        rates.get("output")
-        or rates.get("output_below_200k")
-        or rates.get("output_below_272k")
-        or 0.0
-    )
-
-    return (
-        row.uncached_input_tokens * in_uncached
-        + row.cached_input_tokens * in_cached
-        + row.output_tokens * out
-    ) / 1_000_000
+    # Local-equivalent path: charge GPU-seconds at the H100 rate.
+    gpu_block = price_card.get("gpu") or {}
+    rate_per_s = gpu_block.get("h100_usd_per_second")
+    if rate_per_s is None:
+        per_hour = gpu_block.get("h100_usd_per_hour")
+        if isinstance(per_hour, dict):
+            per_hour = per_hour.get("value")
+        if per_hour is None:
+            return 0.0
+        rate_per_s = per_hour / 3600.0
+    seconds = row.gpu_s_estimate or row.wallclock_s or 0.0
+    return float(seconds) * float(rate_per_s)
 
 
 def compute(ledger_path: Path, price_card: dict[str, Any]) -> float:
