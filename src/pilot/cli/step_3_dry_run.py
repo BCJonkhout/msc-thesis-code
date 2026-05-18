@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 import sys
 import traceback
 from collections import defaultdict
@@ -54,6 +55,18 @@ from pilot.eval import (
     parse_mc_answer,
 )
 from pilot.ledger import CostLedger, new_run_id
+from pilot.preprocess_cache import (
+    CacheRequiredMiss,
+    build_cache_key_inputs,
+    capture_build_rows_since,
+    default_cache_root,
+    hash_cache_key,
+    ledger_byte_size,
+    load_cache_entry,
+    make_build_meta,
+    replay_build_ledger,
+    save_cache_entry,
+)
 from pilot.providers import get_provider
 from pilot.providers.base import CacheControl
 
@@ -380,6 +393,8 @@ def run_dry_run(
     resume_from: Path | None = None,
     summary_provider: str | None = None,
     summary_model: str | None = None,
+    cache_required: bool = False,
+    cache_root: Path | None = None,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     if "qasper" in datasets:
@@ -466,6 +481,13 @@ def run_dry_run(
     for it in items:
         remaining_paper_questions[it["paper_id"]] += 1
 
+    # Resolved summary model id — needed both for the cache key (so a
+    # change in summary model invalidates the cached artefact) and for
+    # ``build_meta`` storage on save. Mirrors the inline default the
+    # arch runners apply when ``summary_model`` is None.
+    resolved_summary_model = summary_model or answerer_model
+    disk_cache_root = cache_root if cache_root is not None else default_cache_root()
+
     try:
         for item in items:
             paper_id = item["paper_id"]
@@ -479,9 +501,79 @@ def run_dry_run(
                 cached_state = preprocessing_cache.get(cache_key)
                 if cached_state is not None and arch in {"naive_rag", "raptor", "graphrag"}:
                     print(
-                        f"[step3-dry-run] HIT  {tag} preprocessing cached",
+                        f"[step3-dry-run] HIT  {tag} preprocessing cached (in-process)",
                         file=sys.stderr,
                     )
+
+                # Disk-cache consult for RAPTOR + GraphRAG. Naive RAG's
+                # build is fast and deterministic (chunk + BGE-M3
+                # embed), so it stays intra-process only. RAPTOR's
+                # tree and GraphRAG's graph both depend on a
+                # non-deterministic LLM summary/extraction stage, so
+                # disk-caching them is what gives cross-candidate
+                # determinism on the rerun.
+                disk_key_inputs: dict[str, Any] | None = None
+                disk_key_hash: str | None = None
+                if (
+                    cached_state is None
+                    and arch in {"raptor", "graphrag"}
+                ):
+                    disk_key_inputs = build_cache_key_inputs(
+                        architecture=arch,
+                        paper_id=paper_id,
+                        dataset=item["dataset"],
+                        summary_model=resolved_summary_model,
+                        summary_temperature=0.0,  # pilot lock § 3.4.3
+                        encoder_model=embedder_model,
+                    )
+                    disk_key_hash = hash_cache_key(disk_key_inputs)
+                    entry = load_cache_entry(
+                        architecture=arch,
+                        paper_id=paper_id,
+                        key_hash=disk_key_hash,
+                        cache_root=disk_cache_root,
+                    )
+                    if entry is not None:
+                        # Disk HIT: replay the build-cost rows into
+                        # THIS candidate's ledger so the per-candidate
+                        # cost accounting stays deployment-realistic,
+                        # then hand the unpickled artefact to the
+                        # runner as ``cached_state``. The runner will
+                        # skip its build branch and only emit per-
+                        # question retrieval + generate rows.
+                        replayed = replay_build_ledger(
+                            ledger=ledger, build_meta=entry.build_meta,
+                        )
+                        cached_state = entry.state
+                        preprocessing_cache[cache_key] = cached_state
+                        print(
+                            f"[step3-dry-run] HIT  {tag} preprocessing cached "
+                            f"(disk, source_run={entry.build_meta.get('build_run_id')}, "
+                            f"replayed_rows={replayed})",
+                            file=sys.stderr,
+                        )
+                    elif cache_required:
+                        # ``--cache-required`` mode: a miss here would
+                        # silently rebuild from scratch and re-trigger
+                        # the cross-candidate divergence the disk
+                        # cache exists to prevent. Abort the whole run
+                        # so the operator can pre-populate the cache.
+                        raise CacheRequiredMiss(
+                            f"cache MISS for {arch}/{paper_id} key={disk_key_hash} "
+                            f"under --cache-required; pre-populate the disk cache "
+                            f"or drop --cache-required"
+                        )
+                    else:
+                        print(
+                            f"[step3-dry-run] MISS {tag} preprocessing cache "
+                            f"(disk, key={disk_key_hash}) — building",
+                            file=sys.stderr,
+                        )
+
+                # Snapshot the ledger position BEFORE the call so we
+                # can capture the preprocess rows the runner emits on
+                # a build (used to populate build_meta after the call).
+                pre_call_ledger_offset = ledger_byte_size(ledger)
                 try:
                     result = _invoke_architecture(
                         arch,
@@ -516,6 +608,55 @@ def run_dry_run(
                 # architectures on the same paper don't collide.
                 if result.preprocessing_state is not None:
                     preprocessing_cache[cache_key] = result.preprocessing_state
+
+                # Persist the freshly-built artefact to disk if we
+                # missed disk-cache above and the runner produced a
+                # state object. Skipping this on intra-process HIT
+                # (``disk_key_inputs is None``) avoids overwriting a
+                # valid entry with itself; skipping on disk HIT (same
+                # condition) avoids re-pickling the already-cached
+                # artefact every question.
+                if (
+                    disk_key_inputs is not None
+                    and disk_key_hash is not None
+                    and result.preprocessing_state is not None
+                    and not result.failed
+                ):
+                    build_rows = capture_build_rows_since(
+                        ledger=ledger,
+                        architecture=arch,
+                        from_byte_offset=pre_call_ledger_offset,
+                    )
+                    build_meta = make_build_meta(
+                        cache_key_inputs=disk_key_inputs,
+                        build_run_id=run_id,
+                        summary_model=resolved_summary_model,
+                        encoder_model=embedder_model,
+                        rows=build_rows,
+                    )
+                    try:
+                        save_cache_entry(
+                            architecture=arch,
+                            paper_id=paper_id,
+                            key_hash=disk_key_hash,
+                            state=result.preprocessing_state,
+                            build_meta=build_meta,
+                            cache_root=disk_cache_root,
+                        )
+                        print(
+                            f"[step3-dry-run] SAVE {tag} preprocessing cache "
+                            f"(disk, key={disk_key_hash}, rows={len(build_rows)})",
+                            file=sys.stderr,
+                        )
+                    except (OSError, pickle.PickleError) as exc:
+                        # Disk save failure is non-fatal — the in-process
+                        # cache still works for the remainder of this
+                        # run; the next process pays a rebuild. Surface
+                        # it so the operator notices.
+                        print(
+                            f"[step3-dry-run] WARN disk-cache save failed for {tag}: {exc!r}",
+                            file=sys.stderr,
+                        )
 
                 scores = _score_item(item, result)
                 row = {
@@ -699,6 +840,31 @@ def main() -> int:
             "its predictions JSONL so it can stand alone for analysis."
         ),
     )
+    parser.add_argument(
+        "--cache-required",
+        action="store_true",
+        help=(
+            "Abort the run on any RAPTOR/GraphRAG disk-cache MISS "
+            "instead of silently rebuilding the artefact. Required "
+            "for cross-candidate determinism runs: a rebuild would "
+            "re-introduce non-determinism in the summary / entity-"
+            "extraction stage and invalidate the cross-answerer "
+            "comparison the cache exists to enable. Pre-populate "
+            "the cache first by running one candidate without this "
+            "flag."
+        ),
+    )
+    parser.add_argument(
+        "--cache-root",
+        type=Path,
+        default=None,
+        help=(
+            "Override the on-disk preprocessing cache root. Defaults "
+            "to code/outputs/preprocess_cache/. Useful for isolated "
+            "test runs or for sharing a cache across multiple "
+            "checkout directories."
+        ),
+    )
     args = parser.parse_args()
 
     summary = run_dry_run(
@@ -714,6 +880,8 @@ def main() -> int:
         resume_from=args.resume_from,
         summary_provider=args.summary_provider,
         summary_model=args.summary_model,
+        cache_required=args.cache_required,
+        cache_root=args.cache_root,
     )
     print(json.dumps(summary, indent=2))
     print(f"\nWrote verdict: {summary['verdict_path']}", file=sys.stderr)

@@ -115,6 +115,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            cache_root=tmp_path / "cache",
         )
 
         assert len(invocations) == 2
@@ -167,6 +168,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            cache_root=tmp_path / "cache",
         )
 
         assert len(invocations) == 4
@@ -212,6 +214,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            cache_root=tmp_path / "cache",
         )
 
         assert len(invocations) == 3
@@ -258,6 +261,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            cache_root=tmp_path / "cache",
         )
 
         assert len(invocations) == 3
@@ -294,6 +298,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            cache_root=tmp_path / "cache",
         )
 
         assert len(captured) == 2
