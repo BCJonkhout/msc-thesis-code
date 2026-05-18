@@ -27,8 +27,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pilot.architectures import graphrag as graphrag_mod
 from pilot.architectures.graphrag import (
+    _ENTITY_EXTRACT_PROMPT,
+    _ENTITY_GLEAN_PROMPT,
     _Entity,
+    _merge_extraction,
     _Relationship,
     _build_graph_and_communities,
     _pack_within_budget,
@@ -366,3 +370,232 @@ class TestRunGraphragEndToEnd:
         # carry the "## Title" marker; the chunk text carries "Alice".
         joined = "\n".join(result.retrieved_evidence_sentences)
         assert "## Title" in joined or "Alice" in joined
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Entity-extraction prompt structure
+# ──────────────────────────────────────────────────────────────────────
+
+class TestEntityExtractPromptStructure:
+    """The extraction prompt is the load-bearing knob for
+    extraction recall on small models (Flash Lite). The audit at
+    `thesis-msc/notes/paper_implementation_audit.md` 156-165 flagged
+    the prior no-few-shot, strict-JSON prompt as the most likely
+    cause of under-reported GraphRAG F1. These assertions pin the
+    ported prompt against silent regressions: three few-shot
+    examples (Microsoft's count), open entity-type rule preserved,
+    relationship-strength field present, JSON output shape kept so
+    the downstream parser doesn't need its own port.
+    """
+
+    def test_prompt_contains_three_few_shot_examples(self):
+        # Microsoft's GRAPH_EXTRACTION_PROMPT pattern uses
+        # "Example 1", "Example 2", "Example 3" as section markers.
+        for marker in ("Example 1", "Example 2", "Example 3"):
+            assert marker in _ENTITY_EXTRACT_PROMPT, (
+                f"missing few-shot marker {marker!r}; the audit flags "
+                f"three shots as load-bearing for small-model extraction"
+            )
+        # Make sure we don't silently grow a fourth shot (Microsoft
+        # caps at three; more would crowd the chunk out of the
+        # context window on smaller models).
+        assert "Example 4" not in _ENTITY_EXTRACT_PROMPT
+
+    def test_prompt_preserves_open_entity_type_extraction(self):
+        # The audit (lines 178-183) calls out open extraction as
+        # deliberate. The prompt must NOT hard-code Microsoft's
+        # four-type list and must explicitly tell the model to
+        # choose types freely.
+        forbidden_fixed_type_list = (
+            "organization, person, geo, event",
+            "ORGANIZATION,PERSON,GEO,EVENT",
+        )
+        for phrase in forbidden_fixed_type_list:
+            assert phrase not in _ENTITY_EXTRACT_PROMPT
+        # And the prompt must explicitly invite open extraction.
+        assert "do not constrain" in _ENTITY_EXTRACT_PROMPT.lower() or \
+               "do not restrict" in _ENTITY_EXTRACT_PROMPT.lower() or \
+               "choose freely" in _ENTITY_EXTRACT_PROMPT.lower()
+
+    def test_prompt_keeps_strict_json_output_shape(self):
+        # Downstream `_parse_extract_json` expects a JSON object with
+        # `entities` and `relationships` arrays. The schema line in
+        # the prompt must match that shape (preserved verbatim so
+        # the parser doesn't need a parallel port).
+        assert '"entities"' in _ENTITY_EXTRACT_PROMPT
+        assert '"relationships"' in _ENTITY_EXTRACT_PROMPT
+        assert '"name"' in _ENTITY_EXTRACT_PROMPT
+        assert '"source"' in _ENTITY_EXTRACT_PROMPT
+        assert '"target"' in _ENTITY_EXTRACT_PROMPT
+        # The Microsoft delimited-tuple format must NOT leak through
+        # — if it did, parsing would silently fall back to the empty
+        # extraction.
+        assert "<|>" not in _ENTITY_EXTRACT_PROMPT
+        assert "<|COMPLETE|>" not in _ENTITY_EXTRACT_PROMPT
+
+    def test_prompt_includes_relationship_strength(self):
+        # Microsoft's `relationship_strength` 1-10 score is preserved
+        # as a `weight` field in our JSON shape; the prompt must
+        # instruct the model to emit it.
+        assert '"weight"' in _ENTITY_EXTRACT_PROMPT
+        # The instruction language should reference the 1-10 scale.
+        assert "1-10" in _ENTITY_EXTRACT_PROMPT or "1 to 10" in _ENTITY_EXTRACT_PROMPT
+
+    def test_prompt_examples_cover_both_workloads(self):
+        # QASPER (research-paper) markers: the audit (line 178-183)
+        # singles out methods, datasets, models, metrics as the
+        # entities our open extraction must surface.
+        lower = _ENTITY_EXTRACT_PROMPT.lower()
+        for marker in ("qasper", "f1"):
+            assert marker in lower, f"research-paper few-shot missing {marker!r}"
+        # NovelQA (narrative fiction) markers: at least one shot
+        # should be a narrative passage with characters and a
+        # location, not a research-paper paragraph.
+        assert "character" in lower
+        # The narrative shot in the seed file uses Pemberley as the
+        # location name; if that example is replaced, this assertion
+        # should be updated alongside it.
+        assert "Pemberley" in _ENTITY_EXTRACT_PROMPT
+
+    def test_glean_prompt_aligns_with_extract_prompt(self):
+        # The gleaning re-prompt must reuse the same JSON output
+        # shape and the same open-type rule, otherwise the model
+        # could silently switch formats between passes and the
+        # parser would drop the gleaning yield.
+        assert "JSON" in _ENTITY_GLEAN_PROMPT or "json" in _ENTITY_GLEAN_PROMPT
+        assert '"entities"' in _ENTITY_GLEAN_PROMPT
+        assert '"relationships"' in _ENTITY_GLEAN_PROMPT
+
+    def test_few_shot_example_outputs_parse_under_current_parser(self):
+        """Each few-shot example's `Output:` block must parse cleanly
+        under `_parse_extract_json`. If a future prompt edit breaks
+        the example JSON (trailing comma, typo, fenced code) the
+        model will be shown an unparseable target and our downstream
+        extraction will silently degrade. Regression-test the three
+        seed examples against the live parser by scanning the
+        rendered prompt for `Output:` blocks and feeding each one to
+        the parser the runtime uses."""
+        rendered = _ENTITY_EXTRACT_PROMPT.format(chunk="<placeholder>")
+        # The three few-shot Output blocks all start with `Output:`
+        # followed by a JSON object opened on the next line. The
+        # last `Output:` in the rendered prompt is the trailing
+        # instruction to the model and has no JSON after it — skip
+        # it and assert against the leading three.
+        segments = rendered.split("Output:")
+        parsed_with_entities = 0
+        for segment in segments[1:]:  # skip pre-first-Output prose
+            # Look at the first top-level JSON object in this
+            # segment. Find the first `{` and walk to its matching
+            # `}` with brace counting.
+            start = segment.find("{")
+            if start == -1:
+                continue
+            depth = 0
+            end = -1
+            for i, ch in enumerate(segment[start:], start=start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            if end == -1:
+                continue
+            block = segment[start:end]
+            try:
+                out = _parse_extract_json(block)
+            except Exception:
+                continue
+            if out.get("entities"):
+                parsed_with_entities += 1
+        assert parsed_with_entities >= 3, (
+            f"expected at least 3 few-shot Output blocks to parse as "
+            f"populated entity extractions; got {parsed_with_entities}"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# _merge_extraction — relationship weight / strength
+# ──────────────────────────────────────────────────────────────────────
+
+class TestMergeExtractionRelationshipStrength:
+    """Microsoft graphrag's `relationship_strength` 1-10 score is
+    preserved as a `weight` field in our JSON shape; the merge must
+    accept multiple aliases (`weight`, `strength`, `relationship_strength`)
+    and clamp pathological values.
+    """
+
+    def test_weight_field_populates_strength_on_relationship(self):
+        ents: dict[str, _Entity] = {}
+        rels: list[_Relationship] = []
+        parsed = {
+            "entities": [{"name": "A", "type": "x", "description": ""}],
+            "relationships": [
+                {"source": "A", "target": "B", "description": "r", "weight": 9},
+            ],
+        }
+        _merge_extraction(ents, rels, parsed, chunk_idx=0)
+        assert len(rels) == 1
+        assert rels[0].strength == 9
+
+    def test_microsoft_alias_relationship_strength_is_accepted(self):
+        ents: dict[str, _Entity] = {}
+        rels: list[_Relationship] = []
+        parsed = {
+            "entities": [],
+            "relationships": [
+                {"source": "A", "target": "B", "description": "r",
+                 "relationship_strength": 7},
+            ],
+        }
+        _merge_extraction(ents, rels, parsed, chunk_idx=0)
+        assert rels[0].strength == 7
+
+    def test_pathological_strength_is_clamped(self):
+        ents: dict[str, _Entity] = {}
+        rels: list[_Relationship] = []
+        parsed = {
+            "entities": [],
+            "relationships": [
+                {"source": "A", "target": "B", "description": "r", "weight": 999},
+                {"source": "C", "target": "D", "description": "r", "weight": -5},
+            ],
+        }
+        _merge_extraction(ents, rels, parsed, chunk_idx=0)
+        assert rels[0].strength == 10
+        assert rels[1].strength == 1
+
+    def test_missing_strength_leaves_field_none(self):
+        ents: dict[str, _Entity] = {}
+        rels: list[_Relationship] = []
+        parsed = {
+            "entities": [],
+            "relationships": [
+                {"source": "A", "target": "B", "description": "r"},
+            ],
+        }
+        _merge_extraction(ents, rels, parsed, chunk_idx=0)
+        assert rels[0].strength is None
+
+    def test_strength_appears_as_edge_attribute_after_graph_build(self):
+        # Two extractions of the same pair with different strengths
+        # should average to the midpoint on the resulting edge.
+        ents = [
+            _Entity(name="A", type="x", description=""),
+            _Entity(name="B", type="x", description=""),
+        ]
+        rels = [
+            _Relationship(source="A", target="B", description="r1",
+                          text_unit_id=0, strength=10),
+            _Relationship(source="A", target="B", description="r2",
+                          text_unit_id=1, strength=2),
+        ]
+        g, _communities, _edge_tu = _build_graph_and_communities(ents, rels)
+        edge = g.edges["A", "B"]
+        # weight is still chunk co-occurrence count (preserved
+        # behaviour); strength is the mean of per-extraction
+        # strengths so downstream code can break ties between
+        # equally-weighted edges by tight-vs-loose relationship.
+        assert edge["weight"] == 2
+        assert edge["strength"] == 6.0

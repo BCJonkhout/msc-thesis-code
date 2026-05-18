@@ -125,62 +125,158 @@ _TEXT_UNIT_PROP = 0.50  # `LocalSearchDefaults.text_unit_prop`
 # Prompts
 # ──────────────────────────────────────────────────────────────────────
 
-_ENTITY_EXTRACT_PROMPT = """You are extracting structured information from a document chunk.
+# Entity-extraction prompt — adapted from Microsoft graphrag
+# `prompts/index/extract_graph.py::GRAPH_EXTRACTION_PROMPT`. Two structural
+# changes vs the upstream prompt:
+#
+#   1. **Open entity-type extraction.** Microsoft hard-codes a fixed
+#      `entity_types` list (default `[organization, person, geo, event]`)
+#      appropriate for the Podcast / News workloads the package was tuned
+#      on. Those four types miss the load-bearing entities for QASPER
+#      research papers (concepts, methods, datasets, models, metrics) and
+#      for NovelQA narratives (characters, locations, plot events,
+#      thematic objects). The workload-specific deviation is documented
+#      in `thesis-msc/notes/paper_implementation_audit.md` (audit row
+#      178-183) as deliberate.
+#   2. **Strict-JSON output instead of delimited tuples.** Microsoft
+#      emits `("entity"<|>NAME<|>TYPE<|>DESC)` records separated by
+#      `##`, terminated by `<|COMPLETE|>`. We keep the JSON output shape
+#      our parser (`_parse_extract_json`) and downstream merge already
+#      consume — porting the tuple format would force a parallel parser
+#      rewrite for no extraction-quality gain. Microsoft's
+#      `relationship_strength` 1-10 score is preserved as an optional
+#      `weight` field in the JSON; `_merge_extraction` reads it when
+#      present and otherwise falls back to the chunk-co-occurrence
+#      weight assigned at graph-build time.
+#
+# What IS ported verbatim from Microsoft: the Goal / Steps / Examples
+# scaffolding, the three-shot example structure (which the audit flags
+# as load-bearing for small-model extraction quality), and the
+# step-by-step instruction to (a) identify entities, (b) identify
+# pairs that are clearly related, (c) emit a relationship-strength
+# score. The three shots are adapted to the QASPER + NovelQA workload
+# mix: one research-paper methods chunk (QASPER-like), one narrative
+# fiction passage (NovelQA-like), one technical results paragraph
+# combining numerical results and citations (QASPER-like).
+_ENTITY_EXTRACT_PROMPT = """-Goal-
+Given a document chunk, identify all entities of any type that are relevant to the chunk's content, then identify all pairs of those entities that are clearly related. Do not restrict yourself to a fixed list of types — the workload includes research papers (where concepts, methods, datasets, models, and metrics are load-bearing) and novel-length fiction (where characters, locations, plot events, and thematic objects are load-bearing). Choose whichever entity types best describe what the chunk is actually about.
 
-Identify all named entities (people, places, organisations, events, concepts, methods, datasets, models, metrics) and the relationships between them. Respond with strict JSON of the form:
+-Steps-
+1. Identify all entities. For each identified entity, extract:
+- name: Name of the entity, exactly as it appears in the text (preserve original casing for proper nouns; lowercase for common-noun concepts).
+- type: A concise lowercase noun describing the entity category (examples: person, character, location, organisation, dataset, model, method, metric, concept, event, work, object). Choose freely; do not constrain yourself to a closed list.
+- description: One sentence describing the entity's attributes and role in the chunk. Preserve verbatim numerical results, model names, and other specific terms.
+
+2. From the entities identified in step 1, identify all pairs of (source, target) that are *clearly related* to each other in the chunk. For each related pair, extract:
+- source: name of the source entity, exactly as in step 1.
+- target: name of the target entity, exactly as in step 1.
+- description: one-sentence explanation of why the two entities are related, grounded in the chunk.
+- weight: integer 1-10 indicating relationship strength. Use 8-10 for tight, explicit relationships (X is Y, X causes Y, X reports the result on Y); 4-7 for clear contextual relationships (X is mentioned alongside Y, X compares against Y); 1-3 for incidental co-occurrence.
+
+3. Return output as STRICT JSON with two top-level keys, `entities` and `relationships`, matching this schema:
 
 {{"entities": [{{"name": "...", "type": "...", "description": "..."}}, ...],
- "relationships": [{{"source": "...", "target": "...", "description": "..."}}, ...]}}
+ "relationships": [{{"source": "...", "target": "...", "description": "...", "weight": 5}}, ...]}}
 
-Use the entity name exactly as it appears in the text. Keep descriptions to one sentence. If a chunk has no entities, return {{"entities": [], "relationships": []}}.
+If the chunk contains no extractable entities, return {{"entities": [], "relationships": []}}.
 
-# Examples
+######################
+-Examples-
+######################
 
-Example 1.
-Chunk: "We evaluate on the QASPER dataset using GPT-4 with retrieval-augmented generation. The Lewis et al. 2020 RAG model serves as our baseline."
+Example 1 (research-paper methods chunk, QASPER-style).
+Chunk: "We evaluate on the QASPER dataset using GPT-4 with retrieval-augmented generation. The Lewis et al. 2020 RAG model serves as our baseline; we measure token-level F1 across 1,000 held-out questions."
 Output:
 {{"entities": [
-    {{"name": "QASPER", "type": "dataset", "description": "Evaluation dataset used in this work."}},
-    {{"name": "GPT-4", "type": "model", "description": "Large language model used for answer generation."}},
-    {{"name": "retrieval-augmented generation", "type": "method", "description": "Generation technique paired with GPT-4 in this work."}},
-    {{"name": "Lewis et al. 2020 RAG", "type": "method", "description": "Baseline RAG model from Lewis et al. 2020."}}
+    {{"name": "QASPER", "type": "dataset", "description": "Question-answering dataset over scientific papers used as the evaluation benchmark in this work."}},
+    {{"name": "GPT-4", "type": "model", "description": "Large language model used for answer generation, paired with retrieval-augmented generation."}},
+    {{"name": "retrieval-augmented generation", "type": "method", "description": "Retrieval-paired generation technique applied to GPT-4 in this evaluation."}},
+    {{"name": "Lewis et al. 2020 RAG", "type": "method", "description": "Baseline RAG model from Lewis et al. 2020, used as the comparison point for GPT-4."}},
+    {{"name": "token-level F1", "type": "metric", "description": "Evaluation metric measured across 1,000 held-out QASPER questions."}}
   ],
  "relationships": [
-    {{"source": "GPT-4", "target": "retrieval-augmented generation", "description": "GPT-4 is paired with RAG."}},
-    {{"source": "GPT-4", "target": "QASPER", "description": "GPT-4 is evaluated on QASPER."}},
-    {{"source": "Lewis et al. 2020 RAG", "target": "GPT-4", "description": "Lewis 2020 RAG is the baseline GPT-4 is compared against."}}
+    {{"source": "GPT-4", "target": "retrieval-augmented generation", "description": "GPT-4 is paired with retrieval-augmented generation in this evaluation.", "weight": 9}},
+    {{"source": "GPT-4", "target": "QASPER", "description": "GPT-4 is evaluated on the QASPER dataset.", "weight": 8}},
+    {{"source": "Lewis et al. 2020 RAG", "target": "GPT-4", "description": "Lewis et al. 2020 RAG is the baseline against which GPT-4 is compared.", "weight": 8}},
+    {{"source": "token-level F1", "target": "QASPER", "description": "Token-level F1 is the metric reported on QASPER's held-out questions.", "weight": 7}}
   ]}}
 
-Example 2.
-Chunk: "Naive RAG performs the worst, achieving 0.137 F1, while RAPTOR scores 0.267 on the QASPER calibration pool."
+Example 2 (narrative fiction passage, NovelQA-style).
+Chunk: "Elizabeth glanced once more at her sister, then turned away from the window. Mr Darcy stood at the far end of the drawing-room at Pemberley, conversing with Colonel Fitzwilliam in a low voice. She felt, for the first time that morning, that she might never understand what passed between them."
 Output:
 {{"entities": [
-    {{"name": "Naive RAG", "type": "method", "description": "Baseline RAG approach achieving 0.137 F1 on QASPER calibration."}},
-    {{"name": "RAPTOR", "type": "method", "description": "Tree-based retrieval method achieving 0.267 F1 on QASPER calibration."}},
-    {{"name": "QASPER calibration pool", "type": "dataset", "description": "Subset of QASPER used for calibration."}},
-    {{"name": "F1", "type": "metric", "description": "Token-level F1 used to score answers."}}
+    {{"name": "Elizabeth", "type": "character", "description": "Female protagonist who observes Mr Darcy and Colonel Fitzwilliam at Pemberley and reflects on her own incomprehension."}},
+    {{"name": "Mr Darcy", "type": "character", "description": "Stands at the far end of the drawing-room at Pemberley, conversing in a low voice with Colonel Fitzwilliam."}},
+    {{"name": "Colonel Fitzwilliam", "type": "character", "description": "Converses privately with Mr Darcy in the drawing-room at Pemberley."}},
+    {{"name": "Pemberley", "type": "location", "description": "Estate whose drawing-room is the setting of this scene."}},
+    {{"name": "the drawing-room", "type": "location", "description": "Room at Pemberley where Mr Darcy and Colonel Fitzwilliam are conversing in a low voice."}},
+    {{"name": "Elizabeth's sister", "type": "character", "description": "Present in the scene; Elizabeth glances at her before turning away from the window."}}
   ],
  "relationships": [
-    {{"source": "Naive RAG", "target": "QASPER calibration pool", "description": "Naive RAG is evaluated on the QASPER calibration pool."}},
-    {{"source": "RAPTOR", "target": "QASPER calibration pool", "description": "RAPTOR is evaluated on the QASPER calibration pool."}},
-    {{"source": "Naive RAG", "target": "RAPTOR", "description": "Both methods are compared on the same QASPER pool; RAPTOR scores higher."}}
+    {{"source": "Mr Darcy", "target": "Colonel Fitzwilliam", "description": "Mr Darcy and Colonel Fitzwilliam are conversing in a low voice in the drawing-room.", "weight": 9}},
+    {{"source": "Mr Darcy", "target": "Pemberley", "description": "Mr Darcy is at Pemberley in this scene.", "weight": 8}},
+    {{"source": "Colonel Fitzwilliam", "target": "Pemberley", "description": "Colonel Fitzwilliam is at Pemberley in this scene.", "weight": 8}},
+    {{"source": "Elizabeth", "target": "Pemberley", "description": "Elizabeth is present at Pemberley, observing Mr Darcy and Colonel Fitzwilliam.", "weight": 7}},
+    {{"source": "Elizabeth", "target": "Mr Darcy", "description": "Elizabeth watches Mr Darcy and reflects that she may never understand what passes between him and Colonel Fitzwilliam.", "weight": 7}},
+    {{"source": "Elizabeth", "target": "Elizabeth's sister", "description": "Elizabeth glances at her sister before turning away from the window.", "weight": 5}}
   ]}}
 
-# Now extract entities and relationships from the following chunk
+Example 3 (technical results paragraph, QASPER-style).
+Chunk: "Naive RAG performs the worst, achieving 0.137 F1, while RAPTOR scores 0.267 on the QASPER calibration pool. GraphRAG (Edge et al. 2024) lands at 0.220 F1, between the two. All three architectures use BGE-M3 for retrieval embeddings and Gemini Flash Lite as the answerer."
+Output:
+{{"entities": [
+    {{"name": "Naive RAG", "type": "method", "description": "Baseline RAG architecture achieving 0.137 F1 on the QASPER calibration pool, the lowest of the three compared."}},
+    {{"name": "RAPTOR", "type": "method", "description": "Tree-based retrieval method achieving 0.267 F1 on the QASPER calibration pool, the highest of the three compared."}},
+    {{"name": "GraphRAG", "type": "method", "description": "Graph-based retrieval-augmented generation method from Edge et al. 2024, achieving 0.220 F1 on the QASPER calibration pool."}},
+    {{"name": "Edge et al. 2024", "type": "citation", "description": "Reference for the GraphRAG method."}},
+    {{"name": "QASPER calibration pool", "type": "dataset", "description": "Subset of QASPER used to calibrate the three architectures."}},
+    {{"name": "F1", "type": "metric", "description": "Token-level F1 used to score architecture outputs on the QASPER calibration pool."}},
+    {{"name": "BGE-M3", "type": "model", "description": "Retrieval embedding model shared by all three architectures."}},
+    {{"name": "Gemini Flash Lite", "type": "model", "description": "Answerer model shared by all three architectures."}}
+  ],
+ "relationships": [
+    {{"source": "Naive RAG", "target": "QASPER calibration pool", "description": "Naive RAG is evaluated on the QASPER calibration pool and achieves 0.137 F1.", "weight": 9}},
+    {{"source": "RAPTOR", "target": "QASPER calibration pool", "description": "RAPTOR is evaluated on the QASPER calibration pool and achieves 0.267 F1.", "weight": 9}},
+    {{"source": "GraphRAG", "target": "QASPER calibration pool", "description": "GraphRAG is evaluated on the QASPER calibration pool and achieves 0.220 F1.", "weight": 9}},
+    {{"source": "GraphRAG", "target": "Edge et al. 2024", "description": "GraphRAG is the method introduced in Edge et al. 2024.", "weight": 10}},
+    {{"source": "Naive RAG", "target": "RAPTOR", "description": "Both methods are compared on the same QASPER pool; RAPTOR scores higher.", "weight": 6}},
+    {{"source": "Naive RAG", "target": "GraphRAG", "description": "Both methods are compared on the same QASPER pool; GraphRAG scores higher.", "weight": 6}},
+    {{"source": "RAPTOR", "target": "GraphRAG", "description": "Both methods are compared on the same QASPER pool; RAPTOR scores higher.", "weight": 6}},
+    {{"source": "BGE-M3", "target": "Naive RAG", "description": "BGE-M3 supplies retrieval embeddings for Naive RAG.", "weight": 7}},
+    {{"source": "BGE-M3", "target": "RAPTOR", "description": "BGE-M3 supplies retrieval embeddings for RAPTOR.", "weight": 7}},
+    {{"source": "BGE-M3", "target": "GraphRAG", "description": "BGE-M3 supplies retrieval embeddings for GraphRAG.", "weight": 7}},
+    {{"source": "Gemini Flash Lite", "target": "Naive RAG", "description": "Gemini Flash Lite is the answerer for Naive RAG.", "weight": 7}},
+    {{"source": "Gemini Flash Lite", "target": "RAPTOR", "description": "Gemini Flash Lite is the answerer for RAPTOR.", "weight": 7}},
+    {{"source": "Gemini Flash Lite", "target": "GraphRAG", "description": "Gemini Flash Lite is the answerer for GraphRAG.", "weight": 7}},
+    {{"source": "F1", "target": "QASPER calibration pool", "description": "F1 is the metric reported on the QASPER calibration pool.", "weight": 8}}
+  ]}}
+
+######################
+-Real Data-
+######################
+
+Now extract entities and relationships from the following chunk. Return STRICT JSON only — no preamble, no trailing commentary, no markdown code fences.
 
 Document chunk:
 {chunk}
+
+Output:
 """
 
-# Microsoft graphrag's gleaning loop appends this single prompt and
-# expects the model to emit additional entities/relationships missed
-# in the first pass. The format is the same as the initial extract.
-_ENTITY_GLEAN_PROMPT = """You previously extracted entities and relationships from this document chunk. Some entities or relationships may have been missed.
+# Microsoft graphrag's gleaning loop (CONTINUE_PROMPT in
+# `prompts/index/extract_graph.py`) re-prompts the model to emit any
+# entities or relationships missed in the first pass. We follow the
+# same single-call pattern, in the same JSON shape as the initial
+# extraction, so `_parse_extract_json` + `_merge_extraction` need no
+# additional branching.
+_ENTITY_GLEAN_PROMPT = """MANY entities and relationships were missed in the last extraction from this chunk. Re-examine the chunk and emit any ADDITIONAL entities and relationships that were not in your prior response. Use the same strict-JSON format, the same open-entity-type rule (no fixed type list), and the same 1-10 relationship weight scale.
 
-Re-examine the chunk and emit any ADDITIONAL entities and relationships that were not in your prior response. Use the same JSON format. If you found nothing new, return {{"entities": [], "relationships": []}}.
+If you found nothing new, return {{"entities": [], "relationships": []}}.
 
 Document chunk:
 {chunk}
+
+Output:
 """
 
 # Lengthened, structured community-report prompt (markdown sections
@@ -231,8 +327,14 @@ class _Relationship:
     target: str
     description: str
     text_unit_id: int = -1
-    # Per-edge weight is the count of distinct chunks the (source, target)
-    # pair appeared in; computed at graph-build time.
+    # Optional per-extraction relationship-strength score (Microsoft
+    # graphrag's `relationship_strength`, 1-10). Parsed lazily from the
+    # LLM's JSON output when present; left as `None` when the model
+    # omits it. The chunk-co-occurrence count assigned at graph-build
+    # time remains the primary edge-weight signal — `strength` is
+    # treated as an additive bonus so missing-strength extractions
+    # still produce a valid graph.
+    strength: int | None = None
 
 
 @dataclass
@@ -361,8 +463,33 @@ def _merge_extraction(
         if not src or not tgt:
             continue
         desc = (raw_r.get("description") or "").strip()
+        # Microsoft graphrag emits `relationship_strength` as an integer
+        # 1-10. We accept either `weight` (our JSON shape) or
+        # `strength` / `relationship_strength` (Microsoft-style) for
+        # forward-compatibility if a future prompt switch reuses the
+        # upstream key names. Lenient coercion: any non-integer falls
+        # back to `None` so the chunk-co-occurrence weight remains the
+        # primary signal.
+        raw_strength = (
+            raw_r.get("weight")
+            if raw_r.get("weight") is not None
+            else raw_r.get("strength")
+            if raw_r.get("strength") is not None
+            else raw_r.get("relationship_strength")
+        )
+        strength: int | None = None
+        if raw_strength is not None:
+            try:
+                strength = int(round(float(raw_strength)))
+                # Clamp to Microsoft's documented 1-10 range so a
+                # pathological LLM output (e.g. 99) can't dominate
+                # every other edge in the graph.
+                strength = max(1, min(10, strength))
+            except (TypeError, ValueError):
+                strength = None
         relationships.append(_Relationship(
-            source=src, target=tgt, description=desc, text_unit_id=chunk_idx,
+            source=src, target=tgt, description=desc,
+            text_unit_id=chunk_idx, strength=strength,
         ))
 
 
@@ -452,9 +579,16 @@ def _build_graph_and_communities(
     edge_counts: dict[tuple[str, str], int] = defaultdict(int)
     edge_descriptions: dict[tuple[str, str], list[str]] = defaultdict(list)
     edge_text_units: dict[tuple[str, str], list[int]] = defaultdict(list)
+    # Microsoft's `relationship_strength` accumulates per edge so that
+    # a tight relationship surfaced once (strength 9) outranks a weak
+    # relationship surfaced once (strength 2). When a strength is
+    # missing we treat it as the neutral midpoint 5 so legacy un-scored
+    # extractions still contribute to the edge weight.
+    edge_strength_sum: dict[tuple[str, str], int] = defaultdict(int)
     for r in relationships:
         key = tuple(sorted((r.source, r.target)))
         edge_counts[key] += 1
+        edge_strength_sum[key] += r.strength if r.strength is not None else 5
         if r.description:
             edge_descriptions[key].append(r.description)
         edge_text_units[key].append(r.text_unit_id)
@@ -462,9 +596,23 @@ def _build_graph_and_communities(
             if n not in g:
                 g.add_node(n, type="unknown", description="", text_unit_ids=())
     for key, count in edge_counts.items():
+        # Edge weight combines chunk co-occurrence count (primary signal,
+        # preserved verbatim) with the mean per-extraction
+        # `relationship_strength` scaled to [0, 1]. Doing this
+        # multiplicatively keeps the existing local-search ranking
+        # behaviour (sort relationships by weight descending) and means
+        # an LLM that ignores the strength field (returning every edge
+        # at the neutral midpoint 5) reproduces the prior weight=count
+        # behaviour exactly. The 0.1 floor prevents a hypothetical
+        # all-1 strength from zeroing out an edge that nevertheless
+        # appears across many chunks.
+        mean_strength = edge_strength_sum[key] / count
+        strength_scale = max(0.1, mean_strength / 10.0)
         g.add_edge(
             key[0], key[1],
             weight=count,
+            strength=round(mean_strength, 2),
+            score=round(count * strength_scale, 3),
             description="\n".join(edge_descriptions[key]),
         )
 
@@ -749,16 +897,29 @@ def _local_search_build_context(
                        -reports_by_id[c].rank if c in reports_by_id else 0),
     )
 
-    # 4. Per-selected-entity relationships (top-k by weight).
-    rels_by_node: dict[str, list[tuple[str, int, str]]] = defaultdict(list)
+    # 4. Per-selected-entity relationships (top-k by weight, with
+    # Microsoft-style relationship-strength as tiebreaker). The
+    # primary ranking signal is unchanged from the prior
+    # implementation (chunk co-occurrence count); strength only breaks
+    # ties between edges seen in the same number of chunks. For a
+    # typical 5-15-chunk QASPER paper most edges appear exactly once,
+    # so the tiebreaker is what surfaces tight (strength 9-10) over
+    # weak (strength 1-3) relationships in the top-k cut.
+    rels_by_node: dict[str, list[tuple[str, int, float, str]]] = defaultdict(list)
     for u, v, data in g.edges(selected_names, data=True):
         if u in selected_names or v in selected_names:
-            rels_by_node[u].append((v, data.get("weight", 1), data.get("description", "")))
-            rels_by_node[v].append((u, data.get("weight", 1), data.get("description", "")))
+            weight = data.get("weight", 1)
+            strength = data.get("strength", 5.0)
+            desc = data.get("description", "")
+            rels_by_node[u].append((v, weight, strength, desc))
+            rels_by_node[v].append((u, weight, strength, desc))
     selected_relationship_lines: list[str] = []
     for e in selected:
-        node_rels = sorted(rels_by_node.get(e.name, []), key=lambda r: -r[1])[:top_k_relationships]
-        for other, weight, desc in node_rels:
+        node_rels = sorted(
+            rels_by_node.get(e.name, []),
+            key=lambda r: (-r[1], -r[2]),
+        )[:top_k_relationships]
+        for other, weight, _strength, desc in node_rels:
             line = f"- **{e.name} ↔ {other}** (weight {weight}): {desc}"
             if line not in selected_relationship_lines:
                 selected_relationship_lines.append(line)
