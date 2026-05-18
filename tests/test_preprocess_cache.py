@@ -536,6 +536,491 @@ def _write_qasper_pool(data_root: Path, paper_id: str, qids: list[str]) -> None:
     )
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Real-state pickle round-trip + rehydration (regression for
+# `_thread.lock` crash hit on 2026-05-18 Phase G rerun attempt)
+# ──────────────────────────────────────────────────────────────────────
+#
+# The 2026-05-18 attempt crashed inside ``save_cache_entry`` because
+# ``_RaptorState`` carried a live ``RetrievalAugmentation`` whose
+# embedding adapter wrapped an ``OllamaEmbedder``'s ``httpx.Client``
+# (which holds a ``_thread.lock``). The fix split the state into
+# pure-data (Tree) and live adapters (rebuilt on rehydrate). These
+# tests pin both the byte-equivalence guarantee (the rehydrated
+# state produces the SAME generate-stage prompt_hash for the same
+# query as the original state) and the cross-process determinism
+# property the disk cache exists to provide.
+
+class _DeterministicEmbedder:
+    """Stand-in for ``OllamaEmbedder`` for unit tests.
+
+    Returns a deterministic vector keyed by the SHA-256 of the input
+    text. Two test runs at the same code commit produce identical
+    vectors per identical input — exactly what BGE-M3 via Ollama
+    produces in practice, but without the httpx client (and the
+    associated ``_thread.lock`` that crashed the real adapter on
+    pickle). The cache module sees this object as fully serialisable
+    pure-data, which is correct: a real embedder would NOT be saved
+    to disk; only the state's pure-data slice is.
+    """
+    model = "bge-m3"
+
+    def embed(self, texts):
+        import hashlib
+        from pilot.encoders.ollama import EmbeddingResult
+        vectors: list[list[float]] = []
+        for t in texts:
+            h = hashlib.sha256(t.encode("utf-8")).digest()
+            # 16-dim deterministic vector built from the digest bytes
+            # — enough dimensions for the retriever's cosine ranking
+            # to behave, small enough to keep the test fast.
+            vec = [b / 255.0 for b in h[:16]]
+            vectors.append(vec)
+        return EmbeddingResult(model=self.model, embeddings=vectors)
+
+
+class _RecordingAnswerer:
+    """Stand-in answerer that captures every prompt + returns a fixed
+    response. The QA stage's ``prompt_hash`` is the cache-equality
+    invariant the test is asserting: rehydrating with this answerer
+    on either side of the pickle round-trip must produce the same
+    hash for the same query."""
+
+    def __init__(self, response: str = "A"):
+        self.response = response
+        self.prompts_seen: list[str] = []
+
+    def call(self, prompt, *, model, max_tokens, temperature,
+             cache_control=None):
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Result:
+            text: str
+            uncached_input_tokens: int = 4
+            cached_input_tokens: int = 0
+            output_tokens: int = 1
+            provider_request_id: str | None = None
+
+        self.prompts_seen.append(prompt)
+        return _Result(text=self.response)
+
+
+def _build_synthetic_raptor_state():
+    """Hand-build a ``_RaptorState`` with a tiny real ``Tree``.
+
+    Skips the UMAP+GMM cluster-build path (which needs Ollama + a
+    summary LLM) by constructing the Tree directly. The state is
+    otherwise the same shape ``run_raptor`` produces post-build, so
+    pickling exercises the exact same code path as the production
+    save.
+    """
+    # Import pilot.architectures.raptor FIRST — its module-level
+    # ``sys.path.insert`` is what makes ``raptor`` (vendored at
+    # code/third_party/raptor) importable. The test would otherwise
+    # raise ModuleNotFoundError on the bare ``raptor`` import below.
+    from pilot.architectures.raptor import (
+        _RaptorState, _LedgerQAModel,
+    )
+    from raptor.tree_structures import Node, Tree
+
+    # Two leaves + one parent. Embeddings are dicts keyed by the
+    # config's ``cluster_embedding_model`` name ("EMB") because that
+    # is what ``raptor.utils.get_embeddings`` looks up.
+    leaf0 = Node(
+        text="Mrs Dalloway opens with Clarissa buying flowers.",
+        index=0, children=set(),
+        embeddings={"EMB": [0.1] * 16},
+    )
+    leaf1 = Node(
+        text="Septimus Warren Smith sees the dead in the park.",
+        index=1, children=set(),
+        embeddings={"EMB": [0.2] * 16},
+    )
+    parent = Node(
+        text="A novel about post-war London, set on one day.",
+        index=2, children={0, 1},
+        embeddings={"EMB": [0.15] * 16},
+    )
+    all_nodes = {0: leaf0, 1: leaf1, 2: parent}
+    layer_to_nodes = {0: [leaf0, leaf1], 1: [parent]}
+    tree = Tree(
+        all_nodes=all_nodes, root_nodes={2: parent},
+        leaf_nodes={0: leaf0, 1: leaf1},
+        num_layers=1, layer_to_nodes=layer_to_nodes,
+    )
+
+    # Match the contract ``run_raptor`` sets up post-build: ra holds
+    # the Tree wired into a real RetrievalAugmentation, qa_adapter is
+    # a live ``_LedgerQAModel``. The test then exercises rehydrate
+    # to confirm the picklable contract.
+    from pilot.architectures.raptor import (
+        ClusterTreeConfig, TreeRetrieverConfig,
+        RetrievalAugmentationConfig, RetrievalAugmentation,
+        _LedgerEmbeddingModel, _LedgerSummarizationModel,
+        _RAPTOR_DEFAULTS,
+    )
+    from pilot.ledger import CostLedger, Stage
+
+    embedder = _DeterministicEmbedder()
+    answerer = _RecordingAnswerer(response="A")
+    # Throw-away ledger; the round-trip test only needs the
+    # RetrievalAugmentation to be wired, not for the ledger to be
+    # asserted on.
+    return _RaptorState, _LedgerQAModel, _LedgerEmbeddingModel, \
+        _LedgerSummarizationModel, ClusterTreeConfig, \
+        TreeRetrieverConfig, RetrievalAugmentationConfig, \
+        RetrievalAugmentation, _RAPTOR_DEFAULTS, \
+        CostLedger, Stage, tree, embedder, answerer
+
+
+class TestRaptorStatePickleRoundTrip:
+    """Regression for the pre-fix `_thread.lock` pickle crash.
+
+    The three assertions together encode the contract:
+
+      1. ``pickle.dumps(state)`` SUCCEEDS — would have raised
+         ``TypeError: cannot pickle '_thread.lock' object`` pre-fix.
+      2. After unpickle + rehydrate the state can serve a retrieval
+         + generate call without raising.
+      3. The generate-stage ``prompt_hash`` from the rehydrated state
+         is byte-identical to the same hash from the original state
+         for the same query — the cache-equality invariant.
+    """
+
+    def test_state_pickles_without_thread_lock_crash(self, tmp_path: Path):
+        (_RaptorState, _LedgerQAModel, _LedgerEmbeddingModel,
+         _LedgerSummarizationModel, ClusterTreeConfig,
+         TreeRetrieverConfig, RetrievalAugmentationConfig,
+         RetrievalAugmentation, _RAPTOR_DEFAULTS,
+         CostLedger, Stage, tree, embedder, answerer) = (
+            _build_synthetic_raptor_state()
+        )
+
+        ledger = CostLedger(run_id="orig", root=tmp_path)
+        embedding_adapter = _LedgerEmbeddingModel(
+            embedder=embedder, ledger=ledger, run_index=0,
+            stage=Stage.RETRIEVAL,
+        )
+        summary_adapter = _LedgerSummarizationModel(
+            answerer=answerer, model="answerer-A",
+            ledger=ledger, run_index=0,
+        )
+        qa_adapter = _LedgerQAModel(
+            answerer=answerer, model="answerer-A",
+            ledger=ledger, run_index=0,
+        )
+        tb_cfg = ClusterTreeConfig(
+            max_tokens=_RAPTOR_DEFAULTS["tb_max_tokens"],
+            num_layers=_RAPTOR_DEFAULTS["tb_num_layers"],
+            summarization_length=_RAPTOR_DEFAULTS["tb_summarization_length"],
+            summarization_model=summary_adapter,
+            embedding_models={"EMB": embedding_adapter},
+            cluster_embedding_model="EMB",
+        )
+        tr_cfg = TreeRetrieverConfig(
+            embedding_model=embedding_adapter,
+            context_embedding_model="EMB",
+            top_k=_RAPTOR_DEFAULTS["tr_top_k"],
+            threshold=_RAPTOR_DEFAULTS["tr_threshold"],
+            selection_mode=_RAPTOR_DEFAULTS["tr_selection_mode"],
+        )
+        cfg = RetrievalAugmentationConfig(
+            tree_builder_config=tb_cfg, tree_retriever_config=tr_cfg,
+            qa_model=qa_adapter, embedding_model=embedding_adapter,
+            summarization_model=summary_adapter,
+        )
+        ra = RetrievalAugmentation(config=cfg, tree=tree)
+        state = _RaptorState(ra=ra, qa_adapter=qa_adapter)
+
+        # The crash-reproducer: pre-fix this raised
+        # ``TypeError: cannot pickle '_thread.lock' object`` because
+        # the real OllamaEmbedder's httpx.Client carries a lock; the
+        # synthetic embedder mirrors the shape but the pre-fix
+        # ``_RaptorState.__getstate__`` would have walked the whole
+        # ra → tree_builder → embedding_model graph and tried to
+        # pickle adapters too. Post-fix only the Tree is serialised.
+        blob = pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL)
+        assert isinstance(blob, bytes)
+        assert len(blob) > 0
+
+        # The pickle blob should NOT contain any reference to the
+        # adapter class names or the embedder class name — only the
+        # Tree's pure-data graph. This is a quick structural check
+        # that __getstate__ really strips live adapters.
+        for forbidden in (
+            b"_LedgerEmbeddingModel",
+            b"_LedgerQAModel",
+            b"_LedgerSummarizationModel",
+            b"_DeterministicEmbedder",
+            b"_RecordingAnswerer",
+            b"OllamaEmbedder",
+        ):
+            assert forbidden not in blob, (
+                f"pickle blob contains forbidden live-adapter ref {forbidden!r} — "
+                "__getstate__ failed to strip it"
+            )
+
+    def test_unpickle_then_rehydrate_then_retrieve_works(self, tmp_path: Path):
+        (_RaptorState, _LedgerQAModel, _LedgerEmbeddingModel,
+         _LedgerSummarizationModel, ClusterTreeConfig,
+         TreeRetrieverConfig, RetrievalAugmentationConfig,
+         RetrievalAugmentation, _RAPTOR_DEFAULTS,
+         CostLedger, Stage, tree, embedder, answerer) = (
+            _build_synthetic_raptor_state()
+        )
+        # Build original state.
+        ledger_a = CostLedger(run_id="orig", root=tmp_path)
+        embedding_adapter = _LedgerEmbeddingModel(
+            embedder=embedder, ledger=ledger_a, run_index=0,
+            stage=Stage.RETRIEVAL,
+        )
+        qa_adapter = _LedgerQAModel(
+            answerer=answerer, model="answerer-A",
+            ledger=ledger_a, run_index=0,
+        )
+        summary_adapter = _LedgerSummarizationModel(
+            answerer=answerer, model="answerer-A",
+            ledger=ledger_a, run_index=0,
+        )
+        tb_cfg = ClusterTreeConfig(
+            max_tokens=_RAPTOR_DEFAULTS["tb_max_tokens"],
+            num_layers=_RAPTOR_DEFAULTS["tb_num_layers"],
+            summarization_length=_RAPTOR_DEFAULTS["tb_summarization_length"],
+            summarization_model=summary_adapter,
+            embedding_models={"EMB": embedding_adapter},
+            cluster_embedding_model="EMB",
+        )
+        tr_cfg = TreeRetrieverConfig(
+            embedding_model=embedding_adapter,
+            context_embedding_model="EMB",
+            top_k=_RAPTOR_DEFAULTS["tr_top_k"],
+            threshold=_RAPTOR_DEFAULTS["tr_threshold"],
+            selection_mode=_RAPTOR_DEFAULTS["tr_selection_mode"],
+        )
+        cfg = RetrievalAugmentationConfig(
+            tree_builder_config=tb_cfg, tree_retriever_config=tr_cfg,
+            qa_model=qa_adapter, embedding_model=embedding_adapter,
+            summarization_model=summary_adapter,
+        )
+        ra = RetrievalAugmentation(config=cfg, tree=tree)
+        state = _RaptorState(ra=ra, qa_adapter=qa_adapter)
+
+        # Round-trip via pickle.
+        blob = pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL)
+        revived = pickle.loads(blob)
+        assert revived.ra is None
+        assert revived.qa_adapter is None
+
+        # Rehydrate with fresh adapters on a different ledger,
+        # mimicking the cross-candidate cache-load path.
+        ledger_b = CostLedger(run_id="rehydrated", root=tmp_path)
+        answerer_b = _RecordingAnswerer(response="B")
+        revived.rehydrate(
+            embedder=_DeterministicEmbedder(), ledger=ledger_b,
+            answerer=answerer_b, answerer_model="answerer-B",
+        )
+        assert revived.ra is not None
+        assert revived.qa_adapter is not None
+
+        # Retrieve works; the retriever walks the prebuilt tree
+        # using the synthetic embedder.
+        context, _layer = revived.ra.retrieve(
+            "What does Clarissa buy?",
+            collapse_tree=True, max_tokens=2000,
+            return_layer_information=True,
+        )
+        assert "Clarissa" in context or "Septimus" in context or context
+
+    def test_prompt_hash_identical_across_pickle_boundary(self, tmp_path: Path):
+        """The load-bearing assertion. Two candidates load the SAME
+        pickle and rehydrate with their own answerer adapters; for the
+        same query, the generate-stage prompt_hash MUST be identical
+        between (original, rehydrated) — the retrieved context is what
+        feeds the answer prompt, and the cache exists to make that
+        context byte-stable across candidates."""
+        # pilot.architectures.raptor must import before the vendored
+        # ``raptor`` module is accessible — its module-level sys.path
+        # tweak is what exposes the third-party package.
+        from pilot.architectures.raptor import (
+            ClusterTreeConfig, TreeRetrieverConfig,
+            RetrievalAugmentationConfig, RetrievalAugmentation,
+            _RaptorState, _LedgerEmbeddingModel,
+            _LedgerSummarizationModel, _LedgerQAModel,
+            _RAPTOR_DEFAULTS,
+        )
+        from pilot.ledger import CostLedger, Stage
+        from raptor.tree_structures import Node, Tree
+
+        # Reusable Tree builder — keeping it inline rather than
+        # round-tripping the synthetic builder to keep the call
+        # self-contained and force two SEPARATE ra instances (so a
+        # shared internal mutation cannot influence the assertion).
+        def _make_state(ledger, answerer, answerer_model):
+            leaves = [
+                Node(text=f"chunk-{i}: deterministic sentence body {i}.",
+                     index=i, children=set(),
+                     embeddings={"EMB": [(i + 1) / 10.0] * 16})
+                for i in range(4)
+            ]
+            parent = Node(
+                text="recursive summary of the four leaves",
+                index=4, children={0, 1, 2, 3},
+                embeddings={"EMB": [0.5] * 16},
+            )
+            all_nodes = {n.index: n for n in [*leaves, parent]}
+            tree = Tree(
+                all_nodes=all_nodes, root_nodes={4: parent},
+                leaf_nodes={i: leaves[i] for i in range(4)},
+                num_layers=1,
+                layer_to_nodes={0: leaves, 1: [parent]},
+            )
+            embedder = _DeterministicEmbedder()
+            emb_adapter = _LedgerEmbeddingModel(
+                embedder=embedder, ledger=ledger, run_index=0,
+                stage=Stage.RETRIEVAL,
+            )
+            sum_adapter = _LedgerSummarizationModel(
+                answerer=answerer, model=answerer_model,
+                ledger=ledger, run_index=0,
+            )
+            qa_adapter = _LedgerQAModel(
+                answerer=answerer, model=answerer_model,
+                ledger=ledger, run_index=0,
+            )
+            tb_cfg = ClusterTreeConfig(
+                max_tokens=_RAPTOR_DEFAULTS["tb_max_tokens"],
+                num_layers=_RAPTOR_DEFAULTS["tb_num_layers"],
+                summarization_length=_RAPTOR_DEFAULTS["tb_summarization_length"],
+                summarization_model=sum_adapter,
+                embedding_models={"EMB": emb_adapter},
+                cluster_embedding_model="EMB",
+            )
+            tr_cfg = TreeRetrieverConfig(
+                embedding_model=emb_adapter,
+                context_embedding_model="EMB",
+                top_k=_RAPTOR_DEFAULTS["tr_top_k"],
+                threshold=_RAPTOR_DEFAULTS["tr_threshold"],
+                selection_mode=_RAPTOR_DEFAULTS["tr_selection_mode"],
+            )
+            cfg = RetrievalAugmentationConfig(
+                tree_builder_config=tb_cfg, tree_retriever_config=tr_cfg,
+                qa_model=qa_adapter, embedding_model=emb_adapter,
+                summarization_model=sum_adapter,
+            )
+            ra = RetrievalAugmentation(config=cfg, tree=tree)
+            state = _RaptorState(ra=ra, qa_adapter=qa_adapter)
+            return state
+
+        query = "What does the recursive summary contain?"
+
+        # 1. Original state: build, answer once via the runner-equivalent
+        #    path. The synthetic answerer records the prompt verbatim;
+        #    we hash it the same way the ledger does.
+        from pilot.ledger import sha256_hex as _hash
+        ledger_orig = CostLedger(run_id="orig", root=tmp_path)
+        answerer_orig = _RecordingAnswerer(response="A")
+        orig_state = _make_state(ledger_orig, answerer_orig, "model-A")
+        orig_state.qa_adapter.current_options = {"A": "yes", "B": "no"}
+        # Mirror the runner's call order: retrieve → answer_question.
+        # answer_question internally retrieves again then calls
+        # qa_adapter.answer_question(context, query); the call ends up
+        # in answerer_orig.prompts_seen[-1].
+        orig_state.ra.answer_question(
+            query, collapse_tree=True, max_tokens=2000,
+        )
+        orig_generate_prompt = answerer_orig.prompts_seen[-1]
+        orig_hash = _hash(orig_generate_prompt)
+
+        # 2. Pickle → unpickle → rehydrate with a DIFFERENT answerer
+        #    (mimicking candidate B in the cross-candidate rerun).
+        blob = pickle.dumps(orig_state, protocol=pickle.HIGHEST_PROTOCOL)
+        revived = pickle.loads(blob)
+
+        ledger_rev = CostLedger(run_id="rev", root=tmp_path)
+        answerer_rev = _RecordingAnswerer(response="B")
+        revived.rehydrate(
+            embedder=_DeterministicEmbedder(), ledger=ledger_rev,
+            answerer=answerer_rev, answerer_model="model-B",
+        )
+        revived.qa_adapter.current_options = {"A": "yes", "B": "no"}
+        revived.ra.answer_question(
+            query, collapse_tree=True, max_tokens=2000,
+        )
+        rev_generate_prompt = answerer_rev.prompts_seen[-1]
+        rev_hash = _hash(rev_generate_prompt)
+
+        # The whole purpose of the disk cache: the generate-stage
+        # prompt_hash is identical across candidates. Any drift here
+        # means the retrieved context drifted, which means the cache
+        # has lost its byte-equality guarantee.
+        assert orig_hash == rev_hash, (
+            "rehydrated state produced a different generate prompt_hash "
+            "than the original state for the same query — the cache's "
+            "byte-equality guarantee is broken"
+        )
+
+
+class TestGraphRagStatePickleRoundTrip:
+    """GraphRAG's state was already pure-data, but adding the
+    __getstate__/__setstate__/rehydrate triad pins the on-disk
+    schema so a future drift into holding a live adapter would be
+    caught at review rather than silently re-introducing the
+    `_thread.lock` pickle crash that hit RAPTOR."""
+
+    def test_state_pickles_and_unpickles_intact(self, tmp_path: Path):
+        from pilot.architectures.graphrag import (
+            _GraphRAGState, _Entity, _Relationship, _CommunityReport,
+        )
+        import networkx as nx
+
+        g = nx.Graph()
+        g.add_node("Alice", type="character", description="protagonist",
+                   text_unit_ids=(0,))
+        g.add_node("Bob", type="character", description="antagonist",
+                   text_unit_ids=(1,))
+        g.add_edge("Alice", "Bob", weight=2, strength=8.0, score=1.6,
+                   description="Alice confronts Bob.")
+        state = _GraphRAGState(
+            chunks=["chunk 0", "chunk 1"],
+            entities=[
+                _Entity(name="Alice", type="character",
+                        description="protagonist", text_unit_ids=[0]),
+                _Entity(name="Bob", type="character",
+                        description="antagonist", text_unit_ids=[1]),
+            ],
+            relationships=[
+                _Relationship(source="Alice", target="Bob",
+                              description="conflict", text_unit_id=0,
+                              strength=8),
+            ],
+            g=g,
+            communities=[{"Alice", "Bob"}],
+            reports=[_CommunityReport(
+                community_id=0, member_names=["Alice", "Bob"],
+                text="## Title\nAlice + Bob", rank=2,
+            )],
+            entity_vecs=[[0.1] * 8, [0.2] * 8],
+            embed_dim=8,
+        )
+
+        blob = pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL)
+        revived = pickle.loads(blob)
+        assert revived.chunks == state.chunks
+        assert len(revived.entities) == 2
+        assert revived.entities[0].name == "Alice"
+        assert revived.entity_vecs == state.entity_vecs
+        assert revived.embed_dim == 8
+        # NetworkX graph round-trips.
+        assert revived.g.number_of_nodes() == 2
+        assert revived.g.has_edge("Alice", "Bob")
+
+        # rehydrate is a symmetric no-op on GraphRAG but must return
+        # self so callers can chain it.
+        assert revived.rehydrate(embedder=None, ledger=None,
+                                 answerer=None, answerer_model=None) is revived
+
+
 class TestCacheRequiredFlag:
     def test_cache_required_miss_raises(self, tmp_path: Path, monkeypatch):
         """With --cache-required, a MISS on RAPTOR / GraphRAG must

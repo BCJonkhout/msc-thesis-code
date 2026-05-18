@@ -365,6 +365,26 @@ class _GraphRAGState:
     indexing time — and re-embedding them per question would both
     waste wall-clock (hundreds of redundant BGE-M3 calls per paper)
     and mis-attribute index-build cost to per-query retrieval.
+
+    Pickle contract
+    ---------------
+    Every field here is pure data: lists of dataclass records, a
+    NetworkX ``Graph`` (whose own state is a node-attr / edge-attr
+    dict), nested str/int/float. No httpx clients, no provider
+    handles. Pickle round-trips trivially, but ``__getstate__`` /
+    ``__setstate__`` / ``rehydrate`` are defined for symmetry with
+    ``pilot.architectures.raptor._RaptorState`` — any future addition
+    of a live adapter field would need to mirror the strip-on-save
+    pattern, and a uniform ``state.rehydrate(...)`` call on the
+    cache-loading side keeps the consumer code arch-agnostic.
+
+    Byte-equivalence guarantee: two candidates that load the same
+    pickle produce the same generate-stage ``prompt_hash`` for the
+    same query because all retrieval inputs (entity vectors,
+    community reports, packed-context budget split) come from the
+    cached state, and the only per-query embed call (the query
+    itself) is deterministic across candidates that share an
+    encoder.
     """
     chunks: list[str]
     entities: list["_Entity"]
@@ -374,6 +394,56 @@ class _GraphRAGState:
     reports: list["_CommunityReport"]
     entity_vecs: list[list[float]]
     embed_dim: int | None
+
+    def __getstate__(self) -> dict:
+        # No live-adapter fields to strip today, but the explicit
+        # __getstate__ pins the on-disk schema so a future drift into
+        # holding an embedder / provider handle here is caught at
+        # review rather than silently re-introducing the pickle bug
+        # ``_RaptorState`` already had.
+        return {
+            "chunks": self.chunks,
+            "entities": self.entities,
+            "relationships": self.relationships,
+            "g": self.g,
+            "communities": self.communities,
+            "reports": self.reports,
+            "entity_vecs": self.entity_vecs,
+            "embed_dim": self.embed_dim,
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        self.chunks = state["chunks"]
+        self.entities = state["entities"]
+        self.relationships = state["relationships"]
+        self.g = state["g"]
+        self.communities = state["communities"]
+        self.reports = state["reports"]
+        self.entity_vecs = state["entity_vecs"]
+        self.embed_dim = state.get("embed_dim")
+
+    def rehydrate(
+        self,
+        *,
+        embedder: object = None,  # noqa: ARG002 — symmetry stub
+        ledger: object = None,    # noqa: ARG002
+        answerer: object = None,  # noqa: ARG002
+        answerer_model: str | None = None,  # noqa: ARG002
+        summary_answerer: object = None,    # noqa: ARG002
+        summary_model: str | None = None,   # noqa: ARG002
+        run_index: int = 0,                  # noqa: ARG002
+        max_tokens: int = 256,               # noqa: ARG002
+    ) -> "_GraphRAGState":
+        """No-op rehydrate, present for symmetry with ``_RaptorState``.
+
+        GraphRAG's local search is constructed per-question from
+        free-standing helpers in this module that take the live
+        embedder / ledger / answerer as positional arguments; nothing
+        on the state object itself needs re-wiring. The signature
+        mirrors ``_RaptorState.rehydrate`` so callers can rehydrate
+        either arch's state with the same kwargs.
+        """
+        return self
 
 
 # ──────────────────────────────────────────────────────────────────────

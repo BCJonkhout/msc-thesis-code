@@ -349,9 +349,164 @@ class _RaptorState:
     amortisation claim: without it, ``C_off^struct`` would be paid
     once per question instead of once per document, inverting the
     cost-vs-quality Pareto and breaking the thesis premise.
+
+    Pickle contract
+    ---------------
+    The intra-process cache only ever needed ``_RaptorState`` to live
+    in memory; the on-disk preprocess cache (``pilot.preprocess_cache``)
+    later started persisting it across processes by pickling.
+    ``ra`` and ``qa_adapter`` both transitively hold an ``OllamaEmbedder``
+    whose ``httpx.Client`` carries a ``_thread.lock`` — unpicklable.
+    The fix splits pure-data from live adapters:
+
+      - ``__getstate__`` serialises ONLY the pure-data tree
+        (``raptor.tree_structures.Tree``: nodes + their embeddings + the
+        layer index). The tree alone is what the retrieved-context
+        determinism guarantee depends on — two candidates loading the
+        same pickle and rehydrating with their own adapters will
+        produce byte-identical prompt-hashes because the retrieval
+        path walks the same tree under the same TreeRetrieverConfig
+        defaults.
+      - ``__setstate__`` parks the deserialised tree on
+        ``self._restored_tree`` and leaves ``ra`` / ``qa_adapter`` as
+        ``None``. Any retrieval / answer call on the half-restored state
+        will fail loudly until ``rehydrate(...)`` is called.
+      - ``rehydrate(...)`` rebuilds a fresh ``RetrievalAugmentation``
+        from the restored tree and the caller-supplied live adapters
+        (embedder, ledger, answerer, models). The embedding adapter is
+        constructed with ``stage=Stage.RETRIEVAL`` because we are
+        post-build by definition on a cache hit; any retrieval-side
+        embed lands in the ``C_on`` retrieval bucket per the
+        cost-attribution rule (project.tex § 3.4.1).
+
+    Byte-equivalence guarantee
+    --------------------------
+    Two candidates that load the SAME pickle and rehydrate with
+    different live adapters (different answerer, same encoder) MUST
+    produce the same generate-stage ``prompt_hash`` for the same
+    query. The shared piece is the retrieved context, which depends
+    only on (the cached tree, the cached entity vectors, the query
+    embedding). The query embedding is byte-identical across
+    candidates because both use BGE-M3 via the same Ollama endpoint.
     """
-    ra: object  # raptor.RetrievalAugmentation
-    qa_adapter: "_LedgerQAModel"
+    ra: object | None  # raptor.RetrievalAugmentation
+    qa_adapter: "_LedgerQAModel | None"
+
+    def __getstate__(self) -> dict:
+        # Pure-data slice only: the already-built tree. Everything else
+        # (config objects, retrievers, builders, adapters) gets
+        # reconstructed on rehydrate from the caller's fresh adapters.
+        tree = None
+        ra = self.ra
+        if ra is not None:
+            tree = getattr(ra, "tree", None)
+        return {"tree": tree}
+
+    def __setstate__(self, state: dict) -> None:
+        # Park the tree on a private slot; surface it through
+        # ``rehydrate`` rather than reconstructing eagerly because
+        # rebuilding the ``RetrievalAugmentation`` needs live adapters
+        # the unpickler cannot supply.
+        self.ra = None
+        self.qa_adapter = None
+        self._restored_tree = state.get("tree")
+
+    def rehydrate(
+        self,
+        *,
+        embedder: OllamaEmbedder,
+        ledger: CostLedger,
+        answerer: AnswererProvider,
+        answerer_model: str,
+        summary_answerer: AnswererProvider | None = None,
+        summary_model: str | None = None,
+        run_index: int = 0,
+        max_tokens: int = 256,
+    ) -> "_RaptorState":
+        """Rebuild ``ra`` + ``qa_adapter`` from the restored tree.
+
+        Idempotent — calling twice with the same adapters is harmless;
+        calling with different adapters re-wires the state to the new
+        adapters. Returns ``self`` for ergonomic chaining.
+
+        The summary adapter is wired in for completeness even though
+        a rehydrated state never re-enters the build phase: a
+        ``RetrievalAugmentation`` constructor requires the field
+        populated. ``summary_answerer`` / ``summary_model`` default to
+        the answerer side to mirror the intra-process build path.
+        """
+        if self.ra is not None and self.qa_adapter is not None:
+            # Already hydrated — just refresh the answerer wiring in
+            # case the caller is swapping adapters on the same state
+            # instance.
+            self.qa_adapter.answerer = answerer
+            self.qa_adapter.model = answerer_model
+            self.qa_adapter.ledger = ledger
+            self.qa_adapter.run_index = run_index
+            self.qa_adapter.max_tokens = max_tokens
+            return self
+
+        tree = getattr(self, "_restored_tree", None)
+        if tree is None and self.ra is not None:
+            tree = getattr(self.ra, "tree", None)
+        if tree is None:
+            raise RuntimeError(
+                "_RaptorState.rehydrate called without a restored tree; "
+                "the pickle was either corrupt or this state was never "
+                "built. Rebuild from the source document instead."
+            )
+
+        s_answerer = summary_answerer or answerer
+        s_model = summary_model or answerer_model
+
+        embedding_adapter = _LedgerEmbeddingModel(
+            embedder=embedder, ledger=ledger, run_index=run_index,
+            # Post-build on every cache-hit path → every query-time
+            # embed lands as RETRIEVAL not PREPROCESS.
+            stage=Stage.RETRIEVAL,
+        )
+        summary_adapter = _LedgerSummarizationModel(
+            answerer=s_answerer, model=s_model,
+            ledger=ledger, run_index=run_index,
+        )
+        qa_adapter = _LedgerQAModel(
+            answerer=answerer, model=answerer_model,
+            ledger=ledger, run_index=run_index, max_tokens=max_tokens,
+        )
+
+        tb_cfg = ClusterTreeConfig(
+            max_tokens=_RAPTOR_DEFAULTS["tb_max_tokens"],
+            num_layers=_RAPTOR_DEFAULTS["tb_num_layers"],
+            summarization_length=_RAPTOR_DEFAULTS["tb_summarization_length"],
+            summarization_model=summary_adapter,
+            embedding_models={"EMB": embedding_adapter},
+            cluster_embedding_model="EMB",
+        )
+        tr_cfg = TreeRetrieverConfig(
+            embedding_model=embedding_adapter,
+            context_embedding_model="EMB",
+            top_k=_RAPTOR_DEFAULTS["tr_top_k"],
+            threshold=_RAPTOR_DEFAULTS["tr_threshold"],
+            selection_mode=_RAPTOR_DEFAULTS["tr_selection_mode"],
+        )
+        cfg = RetrievalAugmentationConfig(
+            tree_builder_config=tb_cfg,
+            tree_retriever_config=tr_cfg,
+            qa_model=qa_adapter,
+            embedding_model=embedding_adapter,
+            summarization_model=summary_adapter,
+        )
+        # Pass the restored ``Tree`` directly so RetrievalAugmentation
+        # initialises its TreeRetriever against the prebuilt structure
+        # without re-running the builder.
+        self.ra = RetrievalAugmentation(config=cfg, tree=tree)
+        self.qa_adapter = qa_adapter
+        # Tree is now owned by ``self.ra``; drop the private slot to
+        # avoid accidental drift between ``self._restored_tree`` and
+        # ``self.ra.tree``.
+        if hasattr(self, "_restored_tree"):
+            del self._restored_tree
+        return self
 
 
 def run_raptor(
@@ -397,6 +552,20 @@ def run_raptor(
         # embedding adapter inside ``ra`` already had its stage
         # flipped to RETRIEVAL at the end of the build that populated
         # this cache entry.
+        #
+        # When the state came off disk (loaded from preprocess_cache),
+        # its live adapters were stripped on pickle and the rehydrate
+        # path must run before the first retrieval call. A state that
+        # was passed in directly from an earlier in-process call
+        # already has ``ra`` + ``qa_adapter`` populated, so the
+        # idempotent rehydrate refreshes the answerer wiring without
+        # rebuilding anything.
+        cached_state.rehydrate(
+            embedder=embedder, ledger=ledger,
+            answerer=answerer, answerer_model=answerer_model,
+            summary_answerer=summary_answerer, summary_model=summary_model,
+            run_index=run_index, max_tokens=max_tokens,
+        )
         qa_adapter = cached_state.qa_adapter
         qa_adapter.current_options = options
         ra = cached_state.ra
