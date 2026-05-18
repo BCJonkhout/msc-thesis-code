@@ -23,6 +23,7 @@ when the host doesn't expose it.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 from pilot.providers.base import AnswererProvider, CacheControl, ProviderResult
@@ -66,6 +67,40 @@ class OpenAICompatibleProvider(AnswererProvider):
     extra_body: dict = {}
     extra_headers: dict = {}
 
+    # Patterns that mark a model id as a reasoning/thinking variant
+    # routed through this OpenAI-compatible surface. Thinking models
+    # spend invisible reasoning tokens against `max_tokens` BEFORE any
+    # visible response is streamed, so a low cap (default 1024 here, or
+    # the smoke-phase 256) gets entirely consumed by reasoning and the
+    # visible completion truncates to an empty string. Phase G evidence
+    # run observed this at 39/74 (~53%) empty rows for
+    # deepseek/deepseek-v4-pro routed via OpenRouter. The same headroom
+    # bump is applied in gemini_provider.py for the gemini-2.5 /
+    # gemini-3 thinking family. Be liberal with detection: false
+    # positives just allocate spare cap (cheap, since billing is on
+    # output_tokens actually emitted); false negatives silently
+    # reproduce the bug.
+    #
+    # xAI exposes both *-reasoning and *-non-reasoning slugs in the
+    # same family, so the matcher must discriminate. Plain substring
+    # search for "-reasoning" would falsely catch "*-non-reasoning";
+    # the regex below uses a negative-lookbehind so "non-reasoning"
+    # tails do not match.
+    _THINKING_MODEL_PATTERNS: tuple[re.Pattern[str], ...] = (
+        re.compile(r"deepseek-v4-pro"),
+        re.compile(r"deepseek-v4-flash"),
+        re.compile(r"deepseek-r1"),
+        # Match "-reasoning" only when NOT preceded by "non".
+        re.compile(r"(?<!non)-reasoning"),
+        # Grok 4.3 ships reasoning-on by default with no separate slug.
+        re.compile(r"grok-4\.3"),
+    )
+
+    @classmethod
+    def _is_thinking_model(cls, model: str) -> bool:
+        model_lc = model.lower()
+        return any(p.search(model_lc) for p in cls._THINKING_MODEL_PATTERNS)
+
     def call(
         self,
         prompt: str,
@@ -82,13 +117,24 @@ class OpenAICompatibleProvider(AnswererProvider):
         if self.extra_headers:
             extra_kwargs["extra_headers"] = dict(self.extra_headers)
 
+        # Thinking-model headroom workaround. See the class-level
+        # comment on _THINKING_MODEL_PATTERNS for the failure mode
+        # (reasoning tokens consume the cap before any visible content
+        # is emitted, truncating the completion to ""). Mirrors the
+        # equivalent fix in gemini_provider.py for the gemini-2.5/3
+        # family. The caller can still override by passing a
+        # max_tokens >= 4096 explicitly.
+        effective_max_tokens = max_tokens if max_tokens is not None else 1024
+        if self._is_thinking_model(model) and effective_max_tokens < 4096:
+            effective_max_tokens = max(effective_max_tokens * 4, 4096)
+
         start = time.perf_counter()
         response = self._client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
             top_p=top_p,
-            max_tokens=max_tokens if max_tokens is not None else 1024,
+            max_tokens=effective_max_tokens,
             **extra_kwargs,
         )
         elapsed = time.perf_counter() - start
