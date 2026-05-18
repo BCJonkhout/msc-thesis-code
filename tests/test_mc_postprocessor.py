@@ -69,3 +69,55 @@ def test_invalid_returns_none(raw: str) -> None:
 def test_full_text_substring_match() -> None:
     """A free-form answer that contains an option's text resolves to that letter."""
     assert parse_mc_answer("The answer is the Eiffel Tower in Paris.", options=OPTIONS) == "A"
+
+
+# --- Regression tests for Phase G mis-scoring bugs ---------------------------
+
+
+def test_options_plural_does_not_yield_S() -> None:
+    """Pattern 4 must not capture the 's' in 'options' under IGNORECASE.
+
+    Earlier the keyword pattern `\\b(?:option|answer|choice)...([A-Z])` would,
+    on input mentioning "options", capture the trailing 's' and uppercase to
+    'S'. Adding `\\b` after the keyword group prevents the partial match.
+    """
+    raw = (
+        "A\n\nThe relevant passage occurs in chapter three. "
+        "The other options do not match the description."
+    )
+    assert parse_mc_answer(raw, options=OPTIONS) == "A"
+
+
+def test_letter_newline_explanation_reasoning_model() -> None:
+    """Reasoning-tuned models emit '<letter>\\n\\n<justification>'.
+
+    Verifies the new early pattern (letter followed by one or more newlines)
+    resolves the letter before any keyword pattern can fire on the body.
+    """
+    raw = "D\n\nThe context describes the construction date and architect."
+    assert parse_mc_answer(raw, options=OPTIONS) == "D"
+
+
+def test_letter_newline_variants() -> None:
+    """Single-newline and trailing-content variants also resolve."""
+    assert parse_mc_answer("A\nBecause ...", options=OPTIONS) == "A"
+    assert parse_mc_answer("  B  \n\nReasoning follows.", options=OPTIONS) == "B"
+
+
+def test_substring_fallback_word_boundary_yes_no() -> None:
+    """'no' must not match inside 'not' for yes/no option sets.
+
+    Before the word-boundary fix, "I do not know" with options ["Yes", "No"]
+    incorrectly resolved to 'B' (No) via plain substring containment.
+    """
+    yn_options = ["Yes", "No"]
+    assert parse_mc_answer("I do not know", options=yn_options) is None
+
+
+def test_substring_fallback_multi_word_still_matches() -> None:
+    """Multi-word option text still resolves via the word-boundary fallback."""
+    opts = ["Spanish necklace", "Italian ring", "French brooch"]
+    assert (
+        parse_mc_answer("She found a Spanish necklace in the drawer.", options=opts)
+        == "A"
+    )

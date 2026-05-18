@@ -26,8 +26,16 @@ _PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"^\s*([A-Z])\s*[\.\:\)]\s+\S"),
     # bare "A" with optional trailing punctuation/whitespace
     re.compile(r"^\s*([A-Z])\s*[\.\!\?\:\)]?\s*$"),
-    # "Option A" / "option a" / "Answer: A" / "The answer is A"
-    re.compile(r"\b(?:option|answer|choice)(?:\s*(?:is|:))?\s*([A-Z])\b", re.IGNORECASE),
+    # "A\n\nExplanation..." — reasoning-tuned models emit the letter on its own
+    # line followed by a justification. Must run before the keyword pattern so
+    # it wins against any incidental "option"/"answer"/"choice" tokens in the
+    # explanation body.
+    re.compile(r"^\s*([A-Z])\s*\n+"),
+    # "Option A" / "option a" / "Answer: A" / "The answer is A".
+    # The trailing \b on the keyword group prevents partial matches against
+    # plurals like "options", which under re.IGNORECASE would otherwise let
+    # the [A-Z] capture pick up the 's' and yield a spurious 'S'.
+    re.compile(r"\b(?:option|answer|choice)\b(?:\s*(?:is|:))?\s*([A-Z])\b", re.IGNORECASE),
     # "(option A)" loose
     re.compile(r"\(\s*(?:option\s+)?([A-Z])\s*\)", re.IGNORECASE),
 )
@@ -64,12 +72,18 @@ def parse_mc_answer(raw: str, options: list[str] | None = None) -> str | None:
     # Fallback: full-option-text match (case-insensitive substring).
     if options:
         text_lc = text.lower()
-        # Prefer exact-equal match; fall back to substring match.
+        # Prefer exact-equal match; fall back to word-boundary match.
         for i, opt in enumerate(options):
             if opt.strip().lower() == text_lc:
                 return chr(ord("A") + i)
+        # Word-boundary search avoids short option strings like "No" matching
+        # inside unrelated words such as "not" on yes/no questions, while
+        # still permitting multi-word option text like "Spanish necklace".
         for i, opt in enumerate(options):
-            if opt.strip() and opt.strip().lower() in text_lc:
+            opt_clean = opt.strip()
+            if opt_clean and re.search(
+                rf"\b{re.escape(opt_clean)}\b", text, re.IGNORECASE
+            ):
                 return chr(ord("A") + i)
 
     return None
