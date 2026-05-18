@@ -648,11 +648,21 @@ def run_dry_run(
                             f"(disk, key={disk_key_hash}, rows={len(build_rows)})",
                             file=sys.stderr,
                         )
-                    except (OSError, pickle.PickleError) as exc:
+                    except (OSError, pickle.PickleError, TypeError) as exc:
                         # Disk save failure is non-fatal — the in-process
                         # cache still works for the remainder of this
                         # run; the next process pays a rebuild. Surface
                         # it so the operator notices.
+                        #
+                        # ``TypeError`` is included because the
+                        # 2026-05-18 Phase G crash surfaced as
+                        # ``TypeError: cannot pickle '_thread.lock'
+                        # object`` from inside pickle, which does NOT
+                        # inherit from ``pickle.PickleError``. After
+                        # the __getstate__/__setstate__/rehydrate fix
+                        # this should not fire, but catching it keeps
+                        # any future drift into an unpicklable field
+                        # from killing a multi-question run silently.
                         print(
                             f"[step3-dry-run] WARN disk-cache save failed for {tag}: {exc!r}",
                             file=sys.stderr,
