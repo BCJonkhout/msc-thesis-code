@@ -58,19 +58,41 @@ class OllamaEmbedder:
     def _post_embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        response = self._client.post(
-            "/api/embed",
-            json={"model": self.model, "input": texts},
-        )
-        if response.status_code == 404:
-            # Most common cause: model not pulled yet. Surface a
-            # specific error so the user knows to run `ollama pull`.
-            raise RuntimeError(
-                f"Ollama returned 404 for model {self.model!r}. "
-                f"Run `ollama pull {self.model}` and retry."
+        # Retry on transient 5xx (Ollama returns 500 under concurrent
+        # load — observed during 4-process parallel cache-builds on
+        # 2026-05-19; a single uncaught 500 inside RAPTOR's threaded
+        # leaf-embed pool kills the entire tree build). Exponential
+        # backoff with jitter; cap at 4 attempts so a true outage
+        # still surfaces rather than masquerading as a hang.
+        import random as _random
+        import time as _time
+
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            response = self._client.post(
+                "/api/embed",
+                json={"model": self.model, "input": texts},
             )
-        response.raise_for_status()
-        data = response.json()
+            if response.status_code == 404:
+                raise RuntimeError(
+                    f"Ollama returned 404 for model {self.model!r}. "
+                    f"Run `ollama pull {self.model}` and retry."
+                )
+            if 500 <= response.status_code < 600:
+                last_exc = httpx.HTTPStatusError(
+                    f"server {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+                if attempt < 3:
+                    _time.sleep((2 ** attempt) * 0.5 + _random.uniform(0, 0.25))
+                    continue
+            response.raise_for_status()
+            data = response.json()
+            break
+        else:
+            if last_exc is not None:
+                raise last_exc
         embeddings = data.get("embeddings")
         if not isinstance(embeddings, list) or len(embeddings) != len(texts):
             raise RuntimeError(

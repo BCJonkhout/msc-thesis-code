@@ -616,6 +616,12 @@ def run_raptor(
             # instantiated with that stage above).
             ra.add_documents(document)
         except Exception as exc:
+            import traceback as _tb, sys as _sys
+            print(
+                f"[raptor] tree_build_failed query={query[:60]!r} exc={exc!r}",
+                file=_sys.stderr,
+            )
+            _tb.print_exc(file=_sys.stderr)
             return ArchitectureResult(
                 architecture="raptor",
                 predicted_answer="",
