@@ -186,7 +186,25 @@ class GeminiProvider(AnswererProvider):
         # Workaround: bump the default cap for thinking models so the
         # visible response has headroom. The caller can still override
         # via the explicit max_tokens kwarg.
-        is_thinking_model = "gemini-3" in model.lower() or "gemini-2.5" in model.lower()
+        #
+        # The ``-latest`` aliases (``gemini-flash-latest``,
+        # ``gemini-pro-latest``) currently point at Gemini 2.5 Flash /
+        # 2.5 Pro respectively and inherit the same thinking-token
+        # accounting, but the explicit ``gemini-2.5`` substring is
+        # absent from the alias name itself. Treat the alias forms as
+        # thinking models so the QASPER short-answer cap (256) is
+        # bumped to the same 4x headroom; without this, every
+        # generate-stage call on ``gemini-flash-latest`` returns
+        # ~10 visible tokens (the entire 256-token budget is consumed
+        # by hidden thinking) and the prediction is silently truncated
+        # mid-prose before any answer-bearing text appears.
+        model_l = model.lower()
+        is_thinking_model = (
+            "gemini-3" in model_l
+            or "gemini-2.5" in model_l
+            or "gemini-flash-latest" in model_l
+            or "gemini-pro-latest" in model_l
+        )
         effective_max_tokens = max_tokens if max_tokens is not None else 1024
         if is_thinking_model and effective_max_tokens < 4096:
             effective_max_tokens = max(effective_max_tokens * 4, 4096)
