@@ -67,13 +67,44 @@ if ($Mode -eq 'slice') {
 
 $base = @('-m', 'pilot.cli.step_3_dry_run') + $common
 
+function Get-PredRowCount {
+    $files = Get-ChildItem -Path 'outputs/runs/main-full-*/*_predictions.jsonl' -ErrorAction SilentlyContinue
+    if (-not $files) { return 0 }
+    return ($files | Get-Content -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
+}
+
+# Re-invoke the runner if it exits non-zero (a native crash like the UMAP
+# segfault, an OOM, or a laptop crash). resume-in-place carries it forward
+# over the already-completed cells. A no-progress guard stops a genuinely
+# deterministic crash from looping forever instead of surfacing it.
+function Invoke-RunWithResume {
+    param([string[]]$RunArgs, [string]$Label, [int]$MaxAttempts = 12)
+    $noProgress = 0
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $before = Get-PredRowCount
+        Write-Host "[main-study] $Label attempt $attempt/$MaxAttempts (predictions so far: $before)"
+        & $python $RunArgs
+        if ($LASTEXITCODE -eq 0) { return $true }
+        $after = Get-PredRowCount
+        Write-Warning "[main-study] $Label exited $LASTEXITCODE (native crash / interruption); predictions $before -> $after. Resuming in place."
+        if ($after -le $before) {
+            $noProgress++
+            if ($noProgress -ge 2) {
+                Write-Host "[main-study] $Label made NO progress across two retries -- stopping. Likely a deterministic crash on one document; inspect the last one logged above and build_failures.jsonl." -ForegroundColor Red
+                return $false
+            }
+        } else {
+            $noProgress = 0
+        }
+        Start-Sleep -Seconds 3
+    }
+    Write-Host "[main-study] $Label exhausted $MaxAttempts attempts." -ForegroundColor Red
+    return $false
+}
+
 Write-Host "[main-study] === primary answerer: $primary (N=5) ==="
 $primaryArgs = $base + @('--answerer-provider', 'google', '--answerer-model', $primary, '--num-runs', '5')
-& $python $primaryArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "primary run exited $LASTEXITCODE"
-    exit $LASTEXITCODE
-}
+if (-not (Invoke-RunWithResume -RunArgs $primaryArgs -Label 'primary')) { exit 1 }
 
 if ($WithSecondary) {
     Write-Host "[main-study] === secondary robustness slice: $secondary (N=1) ==="
@@ -81,7 +112,7 @@ if ($WithSecondary) {
     # context (preprocess cache is keyed by summary model + encoder, not the
     # answerer). Requires XAI_API_KEY.
     $secondaryArgs = $base + @('--answerer-provider', 'xai', '--answerer-model', $secondary, '--run-index', '0', '--cache-required')
-    & $python $secondaryArgs
+    if (-not (Invoke-RunWithResume -RunArgs $secondaryArgs -Label 'secondary')) { exit 1 }
 } else {
     Write-Host '[main-study] secondary grok slice SKIPPED (-WithSecondary to include; needs XAI_API_KEY).'
 }

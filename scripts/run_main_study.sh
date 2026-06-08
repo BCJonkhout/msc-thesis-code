@@ -88,13 +88,51 @@ COMMON="--split full $CAPS --datasets qasper novelqa \
   --summary-provider google --summary-model $SUMMARY \
   --prompt-style literature"
 
+# Total prediction rows on disk -- used to detect whether a crashed
+# attempt made forward progress before resuming.
+pred_rows() {
+  local n=0 f
+  for f in outputs/runs/main-full-*/*_predictions.jsonl; do
+    [ -f "$f" ] && n=$((n + $(wc -l < "$f")))
+  done
+  echo "$n"
+}
+
+# Re-invoke the runner if it exits non-zero (native crash / OOM / laptop
+# crash); resume-in-place carries it forward over the completed cells. A
+# no-progress guard stops a deterministic crash from looping instead of
+# surfacing it.
+run_with_resume() {  # $1=label, rest=runner args
+  local label="$1"; shift
+  local max=12 attempt noprog=0 before after
+  for attempt in $(seq 1 "$max"); do
+    before=$(pred_rows)
+    echo "[main-study] $label attempt $attempt/$max (predictions so far: $before)"
+    if "$PYTHON" -m pilot.cli.step_3_dry_run "$@"; then return 0; fi
+    after=$(pred_rows)
+    echo "[main-study] $label crashed/interrupted; resuming in place ($before -> $after)" >&2
+    if [ "$after" -le "$before" ]; then
+      noprog=$((noprog + 1))
+      if [ "$noprog" -ge 2 ]; then
+        echo "[main-study] $label made NO progress across two retries -- stopping (likely a deterministic crash on one document; check build_failures.jsonl)." >&2
+        return 1
+      fi
+    else
+      noprog=0
+    fi
+    sleep 3
+  done
+  echo "[main-study] $label exhausted $max attempts." >&2
+  return 1
+}
+
 echo "[main-study] === primary answerer: $PRIMARY (N=5) ==="
 # The primary pass populates the per-document preprocess cache and the
 # per-chunk embed cache on miss (no --cache-required, so it builds).
 # shellcheck disable=SC2086
-$PYTHON -m pilot.cli.step_3_dry_run $COMMON \
+run_with_resume "primary" $COMMON \
   --answerer-provider google --answerer-model "$PRIMARY" \
-  --num-runs 5
+  --num-runs 5 || exit 1
 
 if [ "${WITH_SECONDARY:-0}" = "1" ]; then
   echo "[main-study] === secondary robustness slice: $SECONDARY (N=1) ==="
@@ -105,9 +143,9 @@ if [ "${WITH_SECONDARY:-0}" = "1" ]; then
   # also aborts loudly if the primary's builds are incomplete, so run this
   # only after the primary pass has finished.) Requires XAI_API_KEY.
   # shellcheck disable=SC2086
-  $PYTHON -m pilot.cli.step_3_dry_run $COMMON \
+  run_with_resume "secondary" $COMMON \
     --answerer-provider xai --answerer-model "$SECONDARY" \
-    --run-index 0 --cache-required
+    --run-index 0 --cache-required || exit 1
 else
   echo "[main-study] secondary grok robustness slice SKIPPED."
   echo "[main-study]   (opt in with WITH_SECONDARY=1; that step is the only one needing XAI_API_KEY.)"

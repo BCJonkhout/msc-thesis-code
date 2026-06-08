@@ -15,14 +15,15 @@ from .tree_structures import Node
 # Import necessary methods from other modules
 from .utils import get_embeddings
 
-# Set a random seed for reproducibility.
-# random.seed alone seeds only Python's `random`; UMAP and the BIC sweep
-# draw from numpy, so numpy must be seeded too, and each UMAP instance must
-# receive random_state explicitly (below). Without these the first
-# cache-builder build of a tree is non-deterministic, so a crash-rebuild at
-# the same code HEAD produces a different tree and breaks the
-# byte-identical-retrieved-context guarantee the cross-answerer comparison
-# relies on.
+# Seed the deterministic parts that are safe to seed (Python random, numpy,
+# and the GMM random_state below). We deliberately do NOT pass random_state
+# to umap.UMAP: doing so forces UMAP onto a numba-compiled deterministic
+# code path that segfaults (Windows access violation 0xC0000005) during
+# "Constructing Layer 0" on larger leaf sets, killing the build process.
+# Cross-answerer determinism does not depend on UMAP being seeded: each
+# tree is built once and stored in the on-disk preprocess cache, and every
+# answerer reuses that byte-identical cached artefact -- so the disk cache,
+# not UMAP's RNG, is the determinism mechanism.
 RANDOM_SEED = 224
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -37,8 +38,7 @@ def global_cluster_embeddings(
     if n_neighbors is None:
         n_neighbors = int((len(embeddings) - 1) ** 0.5)
     reduced_embeddings = umap.UMAP(
-        n_neighbors=n_neighbors, n_components=dim, metric=metric,
-        random_state=RANDOM_SEED,
+        n_neighbors=n_neighbors, n_components=dim, metric=metric
     ).fit_transform(embeddings)
     return reduced_embeddings
 
@@ -47,8 +47,7 @@ def local_cluster_embeddings(
     embeddings: np.ndarray, dim: int, num_neighbors: int = 10, metric: str = "cosine"
 ) -> np.ndarray:
     reduced_embeddings = umap.UMAP(
-        n_neighbors=num_neighbors, n_components=dim, metric=metric,
-        random_state=RANDOM_SEED,
+        n_neighbors=num_neighbors, n_components=dim, metric=metric
     ).fit_transform(embeddings)
     return reduced_embeddings
 
