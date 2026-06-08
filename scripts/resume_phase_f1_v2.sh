@@ -50,7 +50,10 @@ fi
 # in place. No verdict scan and no --resume-from needed — idempotent by
 # construction.
 echo "[resume] Resuming in place by config (canonical run dir)"
+# OLLAMA_EMBED_CACHE_DIR persists per-chunk embeddings so a crash
+# mid-build re-embeds only the unfinished tail, not the whole document.
 exec env PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 \
+  OLLAMA_EMBED_CACHE_DIR=outputs/embed_cache \
   "$PYTHON" -m pilot.cli.step_3_dry_run \
     --architectures flat naive_rag raptor graphrag \
     --datasets qasper \

@@ -23,11 +23,15 @@ server and running builds sequentially.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import random
+import re
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 import httpx
@@ -44,6 +48,19 @@ _EMBED_SEMAPHORE = threading.Semaphore(_EMBED_CONCURRENCY)
 # disconnects, read timeouts). Wider than a couple of attempts because
 # under saturation the server can 500 for several seconds before draining.
 _MAX_ATTEMPTS = max(1, int(os.environ.get("OLLAMA_EMBED_MAX_ATTEMPTS", "8")))
+
+# Optional content-addressed embedding cache. When OLLAMA_EMBED_CACHE_DIR
+# is set (or a cache_dir is passed to the embedder), each (model, text)
+# embedding is stored under <dir>/<model>/<h[:2]>/<h>.json so a crash
+# mid-build re-embeds only the unfinished tail instead of re-embedding the
+# whole document. Keyed by content hash, so a hit is exact and the store
+# is concurrency-safe across parallel build lanes (atomic write,
+# last-writer-wins on byte-identical content).
+_EMBED_CACHE_DIR = os.environ.get("OLLAMA_EMBED_CACHE_DIR")
+
+
+def _model_slug(model: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", model).strip("-") or "model"
 
 
 def _backoff_sleep(attempt: int) -> None:
@@ -78,6 +95,7 @@ class OllamaEmbedder:
         base_url: str | None = None,
         timeout_s: float = 120.0,
         batch_size: int = 32,
+        cache_dir: str | Path | None = None,
     ) -> None:
         self.model = model
         url = base_url or os.environ.get("OLLAMA_HOST") or "http://localhost:11434"
@@ -88,6 +106,10 @@ class OllamaEmbedder:
         self.base_url = url.rstrip("/")
         self.timeout_s = timeout_s
         self.batch_size = batch_size
+        # Content-addressed embedding cache (None = disabled). Explicit
+        # cache_dir wins; otherwise fall back to OLLAMA_EMBED_CACHE_DIR.
+        _cache = cache_dir if cache_dir is not None else _EMBED_CACHE_DIR
+        self._cache_dir = Path(_cache) if _cache else None
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout_s)
 
     def _request_embed(self, texts: list[str]) -> list[list[float]]:
@@ -163,14 +185,71 @@ class OllamaEmbedder:
             right = self._post_embed(texts[mid:])
             return left + right
 
+    # ── content-addressed embedding cache ──────────────────────────────
+    def _cache_file(self, text: str) -> Path:
+        h = hashlib.sha256(
+            f"{self.model}\x00{text}".encode("utf-8")
+        ).hexdigest()
+        return self._cache_dir / _model_slug(self.model) / h[:2] / f"{h}.json"
+
+    def _cache_get(self, text: str) -> list[float] | None:
+        path = self._cache_file(text)
+        if not path.exists():
+            return None
+        try:
+            vec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None  # treat a corrupt entry as a miss
+        if isinstance(vec, list):
+            return [float(x) for x in vec]
+        return None
+
+    def _cache_put(self, text: str, vec: list[float]) -> None:
+        path = self._cache_file(text)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic, concurrency-safe: a unique tmp avoids collisions
+            # across parallel lanes; os.replace is atomic; identical
+            # content makes last-writer-wins harmless.
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(vec), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass  # a cache-write failure must never break the embed
+
     def embed(self, texts: Iterable[str]) -> EmbeddingResult:
-        """Embed a sequence of strings; returns vectors in input order."""
+        """Embed a sequence of strings; returns vectors in input order.
+
+        When a cache dir is configured, already-embedded (model, text)
+        pairs are served from disk and only the misses are POSTed, so a
+        crash mid-build re-embeds only the unfinished tail.
+        """
         items = list(texts)
-        all_vectors: list[list[float]] = []
-        for offset in range(0, len(items), self.batch_size):
-            batch = items[offset : offset + self.batch_size]
-            all_vectors.extend(self._post_embed(batch))
-        return EmbeddingResult(model=self.model, embeddings=all_vectors)
+        vectors: list[list[float] | None] = [None] * len(items)
+
+        # Resolve cache hits; collect misses preserving input positions.
+        miss_positions: list[int] = []
+        miss_texts: list[str] = []
+        for i, text in enumerate(items):
+            cached = self._cache_get(text) if self._cache_dir is not None else None
+            if cached is not None:
+                vectors[i] = cached
+            else:
+                miss_positions.append(i)
+                miss_texts.append(text)
+
+        # Embed the misses in batches, then backfill + persist.
+        embedded: list[list[float]] = []
+        for offset in range(0, len(miss_texts), self.batch_size):
+            embedded.extend(self._post_embed(miss_texts[offset : offset + self.batch_size]))
+        for k, pos in enumerate(miss_positions):
+            vectors[pos] = embedded[k]
+            if self._cache_dir is not None:
+                self._cache_put(miss_texts[k], embedded[k])
+
+        return EmbeddingResult(
+            model=self.model, embeddings=[v for v in vectors if v is not None]
+        )
 
     def close(self) -> None:
         self._client.close()
