@@ -49,14 +49,35 @@ fi
 
 # Ollama liveness (BGE-M3 embedder). Single-flight server-side concurrency
 # avoids the sustained-500 saturation that blocked the B41 build.
+# Honors OLLAMA_HOST so this can point at an Ollama on another host (e.g.
+# the Windows host when run from WSL -- that server must bind 0.0.0.0 and
+# the firewall must allow it). Fails fast instead of hanging forever when
+# Ollama is neither reachable nor installable here.
+OLLAMA_URL="${OLLAMA_HOST:-http://localhost:11434}"
+case "$OLLAMA_URL" in http://*|https://*) ;; *) OLLAMA_URL="http://$OLLAMA_URL" ;; esac
 if ! curl -s -o /dev/null --connect-timeout 3 -w "%{http_code}" \
-        http://localhost:11434/api/tags | grep -q "200"; then
+        "$OLLAMA_URL/api/tags" | grep -q "200"; then
+  if ! command -v ollama >/dev/null 2>&1; then
+    echo "[main-study] ERROR: Ollama not reachable at $OLLAMA_URL and 'ollama' is" >&2
+    echo "[main-study]   not on PATH here, so it cannot be started. If Ollama runs" >&2
+    echo "[main-study]   on another host (e.g. the Windows host while this runs in" >&2
+    echo "[main-study]   WSL), set OLLAMA_HOST to it (server must bind 0.0.0.0) -- or" >&2
+    echo "[main-study]   run on the host where Ollama lives (scripts/run_main_study.ps1" >&2
+    echo "[main-study]   on Windows)." >&2
+    exit 1
+  fi
   echo "[main-study] starting Ollama (OLLAMA_NUM_PARALLEL=1)"
   OLLAMA_NUM_PARALLEL=1 ollama serve > /tmp/ollama.log 2>&1 &
-  until curl -s -o /dev/null --connect-timeout 1 -w "%{http_code}" \
-            http://localhost:11434/api/tags | grep -q "200"; do
+  for _ in $(seq 1 60); do
+    if curl -s -o /dev/null --connect-timeout 1 -w "%{http_code}" \
+          http://localhost:11434/api/tags | grep -q "200"; then break; fi
     sleep 1
   done
+  if ! curl -s -o /dev/null --connect-timeout 1 -w "%{http_code}" \
+        http://localhost:11434/api/tags | grep -q "200"; then
+    echo "[main-study] ERROR: Ollama did not come up within 60s; see /tmp/ollama.log" >&2
+    exit 1
+  fi
 fi
 
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1
