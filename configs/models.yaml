@@ -319,27 +319,33 @@ final_answerer:
     on the full 4-architecture sweep ($0.126 vs $0.403). Verdict
     written to outputs/sanity/phase_f1_kendall.json.
 
-  alternate_for_cross_model_check: TBD
+  alternate_for_cross_model_check: grok-4-fast-reasoning
   alternate_source: pilot:5.8#16
   alternate_selection_rule: >
-    One alternate closed candidate from a different provider family
-    (i.e. NOT Google), used in the cross-model stability subsample
-    alongside the primary and one open-weights candidate. Drops back
-    to primary-only after the cross-model check resolves. Phase F.2
-    candidates available on the active slate: grok-4-1-fast-non-
-    reasoning, grok-4.20-0309-non-reasoning, grok-4.3 (xAI family).
+    Single cross-vendor robustness slice for the main study. The most
+    rank-diverse non-Google family in the pilot was xAI Grok (the only
+    family whose top-rank NovelQA architecture is not unanimously Flat),
+    so grok-4-fast-reasoning runs the same workload at N=1 per cell as a
+    single-vendor robustness probe alongside the primary answerer. The
+    single-answerer main study does NOT run a full architecture x
+    answerer factorial; the pilot rank-stability result licenses that.
+    grok-4-fast-reasoning is on the active slate (closed_candidates).
+    The public alias may roll across vendor pushes, so the exact build
+    id must be recorded in the run manifest at launch.
 
-  open_weights_for_cross_model_check: TBD
+  open_weights_for_cross_model_check: not_used_in_main_study
   open_weights_source: pilot:5.8#16
   open_weights_candidates: >
-    deepseek/deepseek-v4-flash ($0.013/20Q-Flat) and deepseek/
-    deepseek-v4-pro ($0.041/20Q-Flat) on the active slate. Either
-    can serve as the open-weights row once multi-provider routing
-    is exercised against a non-Google primary; with Flash Lite as
-    primary, the open-weights row only matters for the optional
-    cross-model check. Run via --answerer-provider openrouter
-    --answerer-model deepseek/deepseek-v4-flash --summary-provider
-    google --summary-model gemini-3.1-flash-lite-preview.
+    The pilot's optional three-way cross-model check (primary + one
+    closed alternate + one open-weights) is NOT part of the
+    single-answerer main study, which runs the primary answerer plus a
+    single Grok robustness slice only. deepseek/deepseek-v4-flash and
+    deepseek/deepseek-v4-pro remain on the active slate and can be run
+    as a supplementary open-weights probe via --answerer-provider
+    openrouter --answerer-model deepseek/deepseek-v4-flash
+    --summary-provider google --summary-model
+    gemini-3.1-flash-lite-preview, but this is not a main-study
+    deliverable.
 
   summary_model: gemini-3.1-flash-lite-preview
   summary_model_source: pilot:5.8#10 + empirical:step_3_2026-05-08
