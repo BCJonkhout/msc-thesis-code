@@ -1060,6 +1060,7 @@ class TestCacheRequiredFlag:
                 naive_rag_top_k=8,
                 data_root=data_root,
                 out_dir=tmp_path / "out",
+                runs_root=tmp_path / "runs",
                 cache_required=True,
                 cache_root=tmp_path / "cache",
             )
@@ -1084,6 +1085,7 @@ class TestCacheRequiredFlag:
             architecture="raptor", paper_id="paperA", dataset="qasper",
             summary_model="m", summary_temperature=0.0,
             encoder_model="bge-m3",
+            seed=cli.CLUSTERING_SEED,
         )
         key_hash = hash_cache_key(key_inputs)
         cached_state = {"built_by": "candidate-A"}
@@ -1122,6 +1124,7 @@ class TestCacheRequiredFlag:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            runs_root=tmp_path / "runs",
             cache_required=True,
             cache_root=cache_root,
         )

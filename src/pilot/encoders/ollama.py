@@ -6,14 +6,49 @@ endpoint. This wrapper exposes a small uniform `Embedder` surface so
 that other code (the Recall@k experiment, the Naive RAG runtime,
 RAPTOR's leaf embedding pass) can swap encoders by changing one
 line in the config.
+
+Concurrency note
+----------------
+Ollama serves embeddings single-threaded by default (and the pilot
+pins ``OMP_NUM_THREADS=1``). RAPTOR builds leaf embeddings through an
+*unbounded* ``ThreadPoolExecutor`` and several build processes can run
+in parallel across provider lanes; without a cap this saturates Ollama
+and it returns sustained HTTP 500s (the deterministic "B41" build
+failure — the root cause was embed-load saturation, not chunk content).
+Two defences live here: a process-global semaphore that serialises this
+process's embed POSTs (``OLLAMA_MAX_CONCURRENCY``, default 1), and a
+retry policy wide enough to ride out transient saturation. Cross-process
+load is additionally bounded by setting ``OLLAMA_NUM_PARALLEL=1`` on the
+server and running builds sequentially.
 """
 from __future__ import annotations
 
 import os
+import random
+import threading
+import time
 from dataclasses import dataclass
 from typing import Iterable
 
 import httpx
+
+
+# Bound concurrent embed POSTs from THIS process into Ollama. RAPTOR's
+# leaf-embed thread pool and Naive RAG/GraphRAG all funnel through here,
+# so a single shared semaphore serialises every embedding request the
+# process makes regardless of how many threads issue them.
+_EMBED_CONCURRENCY = max(1, int(os.environ.get("OLLAMA_MAX_CONCURRENCY", "1")))
+_EMBED_SEMAPHORE = threading.Semaphore(_EMBED_CONCURRENCY)
+
+# Retry budget for transient failures (sustained-load 500s, transport
+# disconnects, read timeouts). Wider than a couple of attempts because
+# under saturation the server can 500 for several seconds before draining.
+_MAX_ATTEMPTS = max(1, int(os.environ.get("OLLAMA_EMBED_MAX_ATTEMPTS", "8")))
+
+
+def _backoff_sleep(attempt: int) -> None:
+    """Capped exponential backoff with jitter."""
+    time.sleep(min(2 ** attempt, 30) * 0.5 + random.uniform(0, 0.5))
 
 
 @dataclass(frozen=True)
@@ -55,24 +90,30 @@ class OllamaEmbedder:
         self.batch_size = batch_size
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout_s)
 
-    def _post_embed(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        # Retry on transient 5xx (Ollama returns 500 under concurrent
-        # load — observed during 4-process parallel cache-builds on
-        # 2026-05-19; a single uncaught 500 inside RAPTOR's threaded
-        # leaf-embed pool kills the entire tree build). Exponential
-        # backoff with jitter; cap at 4 attempts so a true outage
-        # still surfaces rather than masquerading as a hang.
-        import random as _random
-        import time as _time
+    def _request_embed(self, texts: list[str]) -> list[list[float]]:
+        """POST one batch with retry on transient 5xx / transport errors.
 
+        Retries cover Ollama's sustained-load 500s and httpx transport /
+        timeout blips with capped exponential backoff + jitter. A 404
+        (model not pulled) and any non-5xx 4xx fail fast. The embed POST is
+        guarded by a process-global semaphore so concurrent RAPTOR leaf
+        threads cannot saturate a single-threaded Ollama.
+        """
         last_exc: Exception | None = None
-        for attempt in range(4):
-            response = self._client.post(
-                "/api/embed",
-                json={"model": self.model, "input": texts},
-            )
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                with _EMBED_SEMAPHORE:
+                    response = self._client.post(
+                        "/api/embed",
+                        json={"model": self.model, "input": texts},
+                    )
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                # Connection resets / read timeouts under load are transient.
+                last_exc = exc
+                if attempt < _MAX_ATTEMPTS - 1:
+                    _backoff_sleep(attempt)
+                    continue
+                raise
             if response.status_code == 404:
                 raise RuntimeError(
                     f"Ollama returned 404 for model {self.model!r}. "
@@ -84,21 +125,43 @@ class OllamaEmbedder:
                     request=response.request,
                     response=response,
                 )
-                if attempt < 3:
-                    _time.sleep((2 ** attempt) * 0.5 + _random.uniform(0, 0.25))
+                if attempt < _MAX_ATTEMPTS - 1:
+                    _backoff_sleep(attempt)
                     continue
+                raise last_exc
             response.raise_for_status()
             data = response.json()
-            break
-        else:
-            if last_exc is not None:
-                raise last_exc
-        embeddings = data.get("embeddings")
-        if not isinstance(embeddings, list) or len(embeddings) != len(texts):
-            raise RuntimeError(
-                f"Unexpected /api/embed response shape: keys={list(data.keys())}"
-            )
-        return [list(map(float, vec)) for vec in embeddings]
+            embeddings = data.get("embeddings")
+            if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+                raise RuntimeError(
+                    f"Unexpected /api/embed response shape: keys={list(data.keys())}"
+                )
+            return [list(map(float, vec)) for vec in embeddings]
+        # Loop exhausted without returning (all attempts were retryable).
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("embed retry loop exhausted without a response")
+
+    def _post_embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch, isolating a genuinely-bad item via bisection.
+
+        If a multi-item batch fails after the full retry budget (e.g. one
+        pathological chunk the server rejects deterministically), split and
+        retry the halves so a single bad item cannot sink an entire batch.
+        A persistently-failing *single* item re-raises so a true outage
+        still surfaces rather than masquerading as a hang.
+        """
+        if not texts:
+            return []
+        try:
+            return self._request_embed(texts)
+        except Exception:
+            if len(texts) == 1:
+                raise
+            mid = len(texts) // 2
+            left = self._post_embed(texts[:mid])
+            right = self._post_embed(texts[mid:])
+            return left + right
 
     def embed(self, texts: Iterable[str]) -> EmbeddingResult:
         """Embed a sequence of strings; returns vectors in input order."""

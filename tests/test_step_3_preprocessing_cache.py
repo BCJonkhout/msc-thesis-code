@@ -115,6 +115,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            runs_root=tmp_path / "runs",
             cache_root=tmp_path / "cache",
         )
 
@@ -168,6 +169,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            runs_root=tmp_path / "runs",
             cache_root=tmp_path / "cache",
         )
 
@@ -214,6 +216,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            runs_root=tmp_path / "runs",
             cache_root=tmp_path / "cache",
         )
 
@@ -261,6 +264,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            runs_root=tmp_path / "runs",
             cache_root=tmp_path / "cache",
         )
 
@@ -298,6 +302,7 @@ class TestPreprocessingCache:
             naive_rag_top_k=8,
             data_root=data_root,
             out_dir=tmp_path / "out",
+            runs_root=tmp_path / "runs",
             cache_root=tmp_path / "cache",
         )
 

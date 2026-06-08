@@ -15,9 +15,17 @@ from .tree_structures import Node
 # Import necessary methods from other modules
 from .utils import get_embeddings
 
-# Set a random seed for reproducibility
+# Set a random seed for reproducibility.
+# random.seed alone seeds only Python's `random`; UMAP and the BIC sweep
+# draw from numpy, so numpy must be seeded too, and each UMAP instance must
+# receive random_state explicitly (below). Without these the first
+# cache-builder build of a tree is non-deterministic, so a crash-rebuild at
+# the same code HEAD produces a different tree and breaks the
+# byte-identical-retrieved-context guarantee the cross-answerer comparison
+# relies on.
 RANDOM_SEED = 224
 random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
 
 
 def global_cluster_embeddings(
@@ -29,7 +37,8 @@ def global_cluster_embeddings(
     if n_neighbors is None:
         n_neighbors = int((len(embeddings) - 1) ** 0.5)
     reduced_embeddings = umap.UMAP(
-        n_neighbors=n_neighbors, n_components=dim, metric=metric
+        n_neighbors=n_neighbors, n_components=dim, metric=metric,
+        random_state=RANDOM_SEED,
     ).fit_transform(embeddings)
     return reduced_embeddings
 
@@ -38,7 +47,8 @@ def local_cluster_embeddings(
     embeddings: np.ndarray, dim: int, num_neighbors: int = 10, metric: str = "cosine"
 ) -> np.ndarray:
     reduced_embeddings = umap.UMAP(
-        n_neighbors=num_neighbors, n_components=dim, metric=metric
+        n_neighbors=num_neighbors, n_components=dim, metric=metric,
+        random_state=RANDOM_SEED,
     ).fit_transform(embeddings)
     return reduced_embeddings
 

@@ -34,8 +34,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import pickle
+import re
 import sys
 import traceback
 from collections import defaultdict
@@ -45,7 +48,7 @@ from typing import Any, Iterable
 
 from pilot.architectures import ArchitectureResult, run_flat, run_naive_rag
 from pilot.architectures.graphrag import run_graphrag
-from pilot.architectures.raptor import run_raptor
+from pilot.architectures.raptor import CLUSTERING_SEED, run_raptor
 from pilot.encoders import OllamaEmbedder, SentenceBoundaryChunker
 from pilot.env import load_env
 from pilot.eval import (
@@ -80,6 +83,72 @@ _DEFAULT_DATASETS = ["qasper", "novelqa"]
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _slug(text: str) -> str:
+    """Filesystem-safe slug for a model id (strips dots / slashes)."""
+    return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower() or "x"
+
+
+def canonical_run_id(
+    *,
+    answerer_provider: str,
+    answerer_model: str,
+    summary_provider: str | None,
+    summary_model: str | None,
+    embedder_model: str,
+    datasets: list[str],
+    architectures: list[str],
+    prompt_style: str,
+    naive_rag_top_k: int,
+) -> str:
+    """Deterministic run id derived from the experiment configuration.
+
+    The same configuration always maps to the same run directory, which
+    is what makes crash-resume idempotent: re-invoking the sweep after a
+    crash reopens the SAME dir, skips the completed cells, and appends
+    only the rest. ``run_index`` is deliberately EXCLUDED so all N
+    repeats share one dir (the per-row ``run_index`` field distinguishes
+    them and the append-only ledger keeps every repeat's cost rows).
+    """
+    payload = {
+        "answerer_provider": answerer_provider,
+        "answerer_model": answerer_model,
+        "summary_provider": summary_provider,
+        "summary_model": summary_model,
+        "embedder_model": embedder_model,
+        "datasets": sorted(datasets),
+        "architectures": sorted(architectures),
+        "prompt_style": prompt_style,
+        "naive_rag_top_k": naive_rag_top_k,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+    return (
+        f"main-{_slug(answerer_model)}-"
+        f"{'-'.join(sorted(datasets))}-{prompt_style}-{digest}"
+    )
+
+
+def _write_manifest(run_dir: Path, manifest: dict[str, Any]) -> None:
+    """Atomically write run_manifest.json (tmp + fsync + os.replace).
+
+    The manifest records the full config and a ``status`` field
+    (``in_progress`` at startup, ``complete`` at clean end). Launchers
+    can read it to tell an in-flight (crashed) run from a finished one
+    without depending on the verdict JSON, which only exists on clean
+    completion.
+    """
+    path = run_dir / "run_manifest.json"
+    tmp = run_dir / "run_manifest.json.tmp"
+    tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    try:
+        with open(tmp, "rb") as fh:
+            os.fsync(fh.fileno())
+    except (OSError, AttributeError):
+        pass
+    os.replace(tmp, path)
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -218,6 +287,7 @@ def _invoke_architecture(
     ledger: CostLedger,
     naive_rag_top_k: int,
     prompt_style: str = "pilot",
+    run_index: int = 0,
     summary_answerer=None,
     summary_model: str | None = None,
     cached_state: object | None = None,
@@ -242,6 +312,7 @@ def _invoke_architecture(
             answerer=answerer,
             answerer_model=answerer_model,
             ledger=ledger,
+            run_index=run_index,
             cache_control=CacheControl.EPHEMERAL_5MIN,
             prompt_style=prompt_style,
         )
@@ -257,6 +328,7 @@ def _invoke_architecture(
             embedder=embedder,
             chunker=chunker,
             ledger=ledger,
+            run_index=run_index,
             top_k=naive_rag_top_k,
             cache_control=CacheControl.EPHEMERAL_5MIN,
             prompt_style=prompt_style,
@@ -280,6 +352,7 @@ def _invoke_architecture(
             summary_answerer=summary_answerer,
             embedder=embedder,
             ledger=ledger,
+            run_index=run_index,
             cached_state=cached_state,
         )
     if architecture == "graphrag":
@@ -295,6 +368,7 @@ def _invoke_architecture(
             summary_answerer=summary_answerer,
             embedder=embedder,
             ledger=ledger,
+            run_index=run_index,
             cached_state=cached_state,
         )
     raise ValueError(f"unsupported architecture: {architecture}")
@@ -337,44 +411,62 @@ def _score_item(
 # ──────────────────────────────────────────────────────────────────────
 
 def _load_resume_state(
-    resume_from: Path | None,
+    run_dir: Path | None,
     architectures: list[str],
 ) -> tuple[
     dict[str, list[dict[str, Any]]],
     dict[str, dict[str, list[float]]],
-    set[tuple[str, str, str]],
+    set[tuple[str, str, str, int]],
 ]:
-    """Load already-completed (architecture, paper_id, question_id) rows
-    from a prior run's per-arch predictions JSONL files.
+    """Load already-completed cells from a run dir's per-arch JSONL files.
 
-    Returns a tuple of (per_arch_predictions, per_arch_scores,
-    completed_keys) suitable for seeding the orchestrator state.
-    Each completed_keys entry is the (arch, paper_id, question_id)
-    tuple already on disk; the main loop skips matching items.
+    Resume-in-place reads back the SAME run directory's
+    ``<arch>_predictions.jsonl`` so a re-invocation skips finished work.
+    Returns (per_arch_predictions, per_arch_scores, completed_keys);
+    each completed key is the 4-tuple ``(arch, paper_id, question_id,
+    run_index)`` so the N repeats are resumed independently. A torn
+    trailing line (partial write at a crash) is skipped with a warning;
+    interior corruption re-raises.
     """
     per_arch_predictions: dict[str, list[dict[str, Any]]] = defaultdict(list)
     per_arch_scores: dict[str, dict[str, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
-    completed: set[tuple[str, str, str]] = set()
+    completed: set[tuple[str, str, str, int]] = set()
 
-    if resume_from is None:
+    if run_dir is None:
         return per_arch_predictions, per_arch_scores, completed
 
     for arch in architectures:
-        path = resume_from / f"{arch}_predictions.jsonl"
+        path = run_dir / f"{arch}_predictions.jsonl"
         if not path.exists():
             continue
-        with path.open(encoding="utf-8") as fh:
-            for line in fh:
-                if not line.strip():
-                    continue
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        for idx, line in enumerate(lines):
+            try:
                 row = json.loads(line)
-                per_arch_predictions[arch].append(row)
-                completed.add((arch, row.get("paper_id", ""), row.get("question_id", "")))
-                for metric, value in row.items():
-                    if metric in {"answer_f1", "evidence_f1", "accuracy"} and isinstance(value, (int, float)):
-                        per_arch_scores[arch][metric].append(float(value))
+            except json.JSONDecodeError:
+                # Only a torn LAST line is tolerable (the next pass
+                # re-executes that one cell); interior corruption is a
+                # real problem and must surface.
+                if idx == len(lines) - 1:
+                    print(
+                        f"[step3-dry-run] WARN skipping torn trailing line in "
+                        f"{path.name}; it will be re-run",
+                        file=sys.stderr,
+                    )
+                    continue
+                raise
+            per_arch_predictions[arch].append(row)
+            completed.add((
+                arch,
+                row.get("paper_id", ""),
+                row.get("question_id", ""),
+                int(row.get("run_index", 0)),
+            ))
+            for metric, value in row.items():
+                if metric in {"answer_f1", "evidence_f1", "accuracy"} and isinstance(value, (int, float)):
+                    per_arch_scores[arch][metric].append(float(value))
 
     return per_arch_predictions, per_arch_scores, completed
 
@@ -390,7 +482,9 @@ def run_dry_run(
     data_root: Path,
     out_dir: Path,
     prompt_style: str = "pilot",
-    resume_from: Path | None = None,
+    run_id: str | None = None,
+    run_index: int = 0,
+    runs_root: Path | None = None,
     summary_provider: str | None = None,
     summary_model: str | None = None,
     cache_required: bool = False,
@@ -425,42 +519,70 @@ def run_dry_run(
     embedder = OllamaEmbedder(model=embedder_model) if needs_embedder else None
     chunker = SentenceBoundaryChunker(chunk_size_tokens=384, overlap_tokens=0) if "naive_rag" in architectures else None
 
-    run_id = new_run_id()
-    runs_root = _project_root() / "outputs" / "runs"
+    runs_root = runs_root if runs_root is not None else _project_root() / "outputs" / "runs"
+    if run_id is None:
+        run_id = canonical_run_id(
+            answerer_provider=answerer_provider,
+            answerer_model=answerer_model,
+            summary_provider=summary_provider,
+            summary_model=summary_model,
+            embedder_model=embedder_model,
+            datasets=datasets,
+            architectures=architectures,
+            prompt_style=prompt_style,
+            naive_rag_top_k=naive_rag_top_k,
+        )
     ledger = CostLedger(run_id=run_id, root=runs_root)
+    run_dir = ledger.run_dir
 
+    # Resume-in-place: completed (arch, paper, qid, run_index) cells are
+    # read back from THIS run dir's own prediction files. Re-invoking the
+    # sweep with the same configuration reopens the same dir, skips the
+    # done cells, and appends only the rest — so a laptop crash mid-sweep
+    # loses at most the in-flight cell, and the append-only ledger (keyed
+    # by run_id) keeps every prior cost row. No copy-forward, no new dir.
     per_arch_predictions, per_arch_scores, completed = _load_resume_state(
-        resume_from, architectures
+        run_dir, architectures
     )
     failures: list[dict[str, Any]] = []
 
     if completed:
         print(
-            f"[step3-dry-run] resume_from={resume_from} reusing "
+            f"[step3-dry-run] resume-in-place run_id={run_id} reusing "
             f"{sum(len(v) for v in per_arch_predictions.values())} prior rows "
             f"across {len(per_arch_predictions)} archs",
             file=sys.stderr,
         )
 
-    # Open per-arch JSONL files in append mode when resuming so prior
-    # rows are preserved; otherwise truncate. Crash-safe incremental
-    # flush is in place below regardless.
-    open_mode = "a" if completed else "w"
+    # Prior rows already live in the per-arch files on disk; open in
+    # append mode and write ONLY new cells (each flushed + fsync'd below).
     pred_files: dict[str, Any] = {
-        arch: (ledger.run_dir / f"{arch}_predictions.jsonl").open(
-            open_mode, encoding="utf-8"
-        )
+        arch: (run_dir / f"{arch}_predictions.jsonl").open("a", encoding="utf-8")
         for arch in architectures
     }
-    if completed:
-        # When resuming, replay the prior rows into the new run's
-        # JSONL too so the new run dir is self-contained.
-        for arch, rows in per_arch_predictions.items():
-            for row in rows:
-                pred_files[arch].write(json.dumps(row, ensure_ascii=False) + "\n")
-            pred_files[arch].flush()
 
-    print(f"[step3-dry-run] run_id={run_id} items={len(items)} archs={architectures}", file=sys.stderr)
+    run_manifest = {
+        "run_id": run_id,
+        "status": "in_progress",
+        "architectures": sorted(architectures),
+        "datasets": sorted(datasets),
+        "answerer_provider": answerer_provider,
+        "answerer_model": answerer_model,
+        "summary_provider": summary_provider or answerer_provider,
+        "summary_model": summary_model or answerer_model,
+        "embedder_model": embedder_model,
+        "naive_rag_top_k": naive_rag_top_k,
+        "prompt_style": prompt_style,
+        "run_index": run_index,
+        "started_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    _write_manifest(run_dir, run_manifest)
+
+    print(
+        f"[step3-dry-run] run_id={run_id} run_index={run_index} "
+        f"items={len(items)} archs={architectures}",
+        file=sys.stderr,
+    )
 
     # Per-(arch, paper_id) preprocessing-state cache. RAPTOR's tree
     # and GraphRAG's knowledge graph are built once per paper and
@@ -492,10 +614,10 @@ def run_dry_run(
         for item in items:
             paper_id = item["paper_id"]
             for arch in architectures:
-                tag = f"{arch}/{item['dataset']}/{paper_id}/{item['question_id']}"
-                key = (arch, paper_id, item["question_id"])
+                tag = f"{arch}/{item['dataset']}/{paper_id}/{item['question_id']}#r{run_index}"
+                key = (arch, paper_id, item["question_id"], run_index)
                 if key in completed:
-                    print(f"[step3-dry-run] SKIP {tag} (already in resume_from)", file=sys.stderr)
+                    print(f"[step3-dry-run] SKIP {tag} (already done)", file=sys.stderr)
                     continue
                 cache_key = (arch, paper_id)
                 cached_state = preprocessing_cache.get(cache_key)
@@ -525,6 +647,11 @@ def run_dry_run(
                         summary_model=resolved_summary_model,
                         summary_temperature=0.0,  # pilot lock § 3.4.3
                         encoder_model=embedder_model,
+                        # Bind the REAL clustering seed (cluster_utils.
+                        # RANDOM_SEED) into the key so a seed change
+                        # invalidates cached trees instead of silently
+                        # reusing artefacts built under a different seed.
+                        seed=CLUSTERING_SEED,
                     )
                     disk_key_hash = hash_cache_key(disk_key_inputs)
                     entry = load_cache_entry(
@@ -534,18 +661,26 @@ def run_dry_run(
                         cache_root=disk_cache_root,
                     )
                     if entry is not None:
-                        # Disk HIT: replay the build-cost rows into
-                        # THIS candidate's ledger so the per-candidate
-                        # cost accounting stays deployment-realistic,
-                        # then hand the unpickled artefact to the
-                        # runner as ``cached_state``. The runner will
-                        # skip its build branch and only emit per-
-                        # question retrieval + generate rows.
-                        replayed = replay_build_ledger(
-                            ledger=ledger, build_meta=entry.build_meta,
-                        )
+                        # Disk HIT. Replay the build-cost rows into this
+                        # ledger ONLY when the artefact was built by a
+                        # DIFFERENT run (cross-candidate reuse), so that
+                        # candidate's deployment cost stays realistic.
+                        # When build_run_id == this run_id the rows are
+                        # already in this ledger (resume-in-place), and
+                        # build cost belongs to run_index 0 only — so
+                        # replaying on a same-run resume or on run_index>0
+                        # would DOUBLE-COUNT. Suppress it in those cases.
                         cached_state = entry.state
                         preprocessing_cache[cache_key] = cached_state
+                        same_run = entry.build_meta.get("build_run_id") == run_id
+                        if run_index == 0 and not same_run:
+                            replayed = replay_build_ledger(
+                                ledger=ledger,
+                                build_meta=entry.build_meta,
+                                target_run_index=run_index,
+                            )
+                        else:
+                            replayed = 0
                         print(
                             f"[step3-dry-run] HIT  {tag} preprocessing cached "
                             f"(disk, source_run={entry.build_meta.get('build_run_id')}, "
@@ -585,6 +720,7 @@ def run_dry_run(
                         ledger=ledger,
                         naive_rag_top_k=naive_rag_top_k,
                         prompt_style=prompt_style,
+                        run_index=run_index,
                         summary_answerer=summary_answerer,
                         summary_model=summary_model,
                         cached_state=cached_state,
@@ -673,6 +809,7 @@ def run_dry_run(
                     "dataset": item["dataset"],
                     "paper_id": item["paper_id"],
                     "question_id": item["question_id"],
+                    "run_index": run_index,
                     "question": item["question"],
                     "predicted_answer": result.predicted_answer,
                     "retrieved_chunks_count": len(result.retrieved_evidence_sentences),
@@ -729,15 +866,11 @@ def run_dry_run(
         for fh in pred_files.values():
             fh.close()
 
-    # End-of-loop pass: rewrite the per-arch JSONL files cleanly. Useful
-    # when re-running an aborted job from in-memory state; harmless when
-    # the incremental flush already covered everything.
-    for arch, rows in per_arch_predictions.items():
-        path = ledger.run_dir / f"{arch}_predictions.jsonl"
-        with path.open("w", encoding="utf-8") as fh:
-            for r in rows:
-                fh.write(json.dumps(r, ensure_ascii=False))
-                fh.write("\n")
+    # No end-of-loop rewrite: every row was already appended + fsync'd
+    # incrementally, and prior rows are durable on disk from earlier
+    # passes. A truncate-and-rewrite here would risk destroying the
+    # durable file on a crash mid-rewrite (the exact failure resume-in-
+    # place exists to avoid).
 
     # Macro averages.
     macro: dict[str, dict[str, float]] = {}
@@ -753,6 +886,7 @@ def run_dry_run(
     summary = {
         "timestamp_utc": timestamp,
         "run_id": run_id,
+        "run_index": run_index,
         "architectures": architectures,
         "datasets": datasets,
         "answerer_provider": answerer_provider,
@@ -774,6 +908,13 @@ def run_dry_run(
     }
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["verdict_path"] = str(out_path)
+
+    # Flip the manifest to complete so a launcher can tell a finished
+    # run_index from an in-flight (crashed) one without the verdict JSON.
+    run_manifest["status"] = "complete"
+    run_manifest["completed_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    run_manifest["failures_count"] = len(failures)
+    _write_manifest(run_dir, run_manifest)
     return summary
 
 
@@ -838,16 +979,49 @@ def main() -> int:
         "--out", type=Path, default=_project_root() / "outputs" / "sanity"
     )
     parser.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "Explicit run directory name under outputs/runs/. Defaults "
+            "to a deterministic id derived from the configuration "
+            "(answerer, datasets, architectures, prompt_style, ...), so "
+            "re-invoking the same sweep resumes IN PLACE: completed "
+            "(arch, paper, question, run_index) cells are skipped and "
+            "only the missing ones run. The append-only ledger keeps "
+            "every prior cost row."
+        ),
+    )
+    parser.add_argument(
+        "--num-runs",
+        type=int,
+        default=1,
+        help=(
+            "Number of repeats (run_index 0..N-1) to execute into the "
+            "same run dir, for across-run variance. The main study uses "
+            "N=5. Ignored when --run-index is given."
+        ),
+    )
+    parser.add_argument(
+        "--run-index",
+        type=int,
+        default=None,
+        help=(
+            "Run a SINGLE repeat at this run_index (for launching the N "
+            "repeats as separate parallel processes). Overrides "
+            "--num-runs. Cost accounting counts run_index 0 only."
+        ),
+    )
+    parser.add_argument(
         "--resume-from",
         type=Path,
         default=None,
         help=(
-            "Path to a prior run directory (outputs/runs/<run_id>/) "
-            "whose <arch>_predictions.jsonl rows should be reused. "
-            "Items already in those files are SKIPPED in this run; "
-            "only the missing ones are re-executed. The new run dir "
-            "is self-contained — prior rows are copied forward into "
-            "its predictions JSONL so it can stand alone for analysis."
+            "Compatibility shim: resume IN PLACE into this exact run "
+            "directory (outputs/runs/<run_id>/) rather than deriving the "
+            "dir from config. Equivalent to --run-id <dirname> with the "
+            "matching runs root. Completed cells are skipped; the ledger "
+            "is preserved (append-only). Prefer --run-id / config-derived "
+            "resume for new runs."
         ),
     )
     parser.add_argument(
@@ -877,25 +1051,55 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    summary = run_dry_run(
-        architectures=args.architectures,
-        datasets=args.datasets,
-        answerer_provider=args.answerer_provider,
-        answerer_model=args.answerer_model,
-        embedder_model=args.embedder_model,
-        naive_rag_top_k=args.naive_rag_top_k,
-        data_root=args.data_root,
-        out_dir=args.out,
-        prompt_style=args.prompt_style,
-        resume_from=args.resume_from,
-        summary_provider=args.summary_provider,
-        summary_model=args.summary_model,
-        cache_required=args.cache_required,
-        cache_root=args.cache_root,
-    )
+    # Resolve the run directory. Resume-in-place: the SAME config maps to
+    # the SAME canonical dir, so re-invoking after a crash resumes
+    # automatically. --run-id pins an explicit dir; --resume-from <dir>
+    # (compat) resumes in place into that exact dir.
+    run_id = args.run_id
+    runs_root: Path | None = None
+    if args.resume_from is not None:
+        run_id = args.resume_from.name
+        runs_root = args.resume_from.parent
+
+    # Which repeats to run. --run-index pins a single repeat (for parallel
+    # launching across processes); otherwise loop 0..num_runs-1 into the
+    # shared dir.
+    indices = [args.run_index] if args.run_index is not None else list(range(args.num_runs))
+
+    summary: dict[str, Any] = {}
+    total_failures = 0
+    for ri in indices:
+        summary = run_dry_run(
+            architectures=args.architectures,
+            datasets=args.datasets,
+            answerer_provider=args.answerer_provider,
+            answerer_model=args.answerer_model,
+            embedder_model=args.embedder_model,
+            naive_rag_top_k=args.naive_rag_top_k,
+            data_root=args.data_root,
+            out_dir=args.out,
+            prompt_style=args.prompt_style,
+            run_id=run_id,
+            run_index=ri,
+            runs_root=runs_root,
+            summary_provider=args.summary_provider,
+            summary_model=args.summary_model,
+            cache_required=args.cache_required,
+            cache_root=args.cache_root,
+        )
+        # Pin the resolved run_id + root so subsequent repeats share the
+        # exact same dir even when it was derived canonically on the first.
+        run_id = summary["run_id"]
+        if runs_root is None:
+            runs_root = Path(summary["predictions_dir"]).parent
+        total_failures += summary["failures_count"]
+        print(
+            f"\nWrote verdict (run_index={ri}): {summary['verdict_path']}",
+            file=sys.stderr,
+        )
+
     print(json.dumps(summary, indent=2))
-    print(f"\nWrote verdict: {summary['verdict_path']}", file=sys.stderr)
-    return 0 if summary["failures_count"] == 0 else 1
+    return 0 if total_failures == 0 else 1
 
 
 if __name__ == "__main__":

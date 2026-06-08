@@ -170,7 +170,7 @@ providers:
         input_uncached: 3.00      # verify on first call
         input_cached_read: 0.30   # verify
         output: 15.00             # verify
-        context_window_tokens: 256000
+        context_window_tokens: 2000000
         verification_required: true
         source: provider:docs.x.ai/docs/api-reference
 
@@ -178,28 +178,28 @@ providers:
         input_uncached: 0.50      # verify
         input_cached_read: 0.05
         output: 1.50
-        context_window_tokens: 256000
+        context_window_tokens: 2000000
         verification_required: true
 
       grok-4-fast-reasoning:
         input_uncached: 0.50
         input_cached_read: 0.05
         output: 1.50
-        context_window_tokens: 256000
+        context_window_tokens: 2000000
         verification_required: true
 
       grok-4.20-0309-non-reasoning:
         input_uncached: 1.00
         input_cached_read: 0.10
         output: 5.00
-        context_window_tokens: 256000
+        context_window_tokens: 2000000
         verification_required: true
 
       grok-4.20-0309-reasoning:
         input_uncached: 1.00
         input_cached_read: 0.10
         output: 5.00
-        context_window_tokens: 256000
+        context_window_tokens: 2000000
         verification_required: true
 
   openrouter:

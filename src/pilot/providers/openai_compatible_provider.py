@@ -59,7 +59,19 @@ class OpenAICompatibleProvider(AnswererProvider):
         # Lazy-key handling: same pattern as Anthropic/OpenAI/DashScope.
         # Construction succeeds even with no key; the call fails with a
         # provider-side 401 if the key is missing or invalid.
-        self._client = OpenAI(api_key=resolved_key, base_url=self.base_url)
+        # Resilience for unattended multi-day runs. The SDK default of 2
+        # retries is too shallow for the sustained 429 bursts seen on
+        # aggregator routes (xAI / OpenRouter); a 429 that outlasts the
+        # retries raises into the sweep dispatcher and leaves the cell with
+        # NO prediction row, which the resume path cannot re-drive because
+        # it keys off rows that are present. Widen retries and set an
+        # explicit timeout sized for long-context generations.
+        self._client = OpenAI(
+            api_key=resolved_key,
+            base_url=self.base_url,
+            max_retries=8,
+            timeout=120.0,
+        )
 
     # Subclasses can override these to inject provider-specific routing
     # controls. extra_body lands in the JSON body; extra_headers lands as

@@ -71,6 +71,13 @@ from raptor import (  # noqa: E402  (import order: must follow sys.path tweak)
     TreeRetrieverConfig,
 )
 
+# The single source of truth for the clustering seed that governs tree
+# determinism (UMAP random_state + numpy seed). Re-exported so the
+# preprocessing cache key can bind to the REAL seed instead of a stale
+# hardcoded constant — if this seed ever changes, every cached tree is
+# correctly invalidated.
+from raptor.cluster_utils import RANDOM_SEED as CLUSTERING_SEED  # noqa: E402
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Embedder adapter
