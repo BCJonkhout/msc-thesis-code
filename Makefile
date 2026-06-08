@@ -71,14 +71,18 @@ completeness-check:
 		$(if $(DATASETS),--datasets $(DATASETS),) \
 		$(if $(NUM_RUNS),--num-runs $(NUM_RUNS),)
 
-# Main-study launcher: single-answerer (Flash Lite N=5) + grok robustness
-# slice (N=1) over the full split. `slice` is the dress rehearsal; `full`
-# resumes in place over it. Idempotent and crash-safe.
+# Main-study launcher. Default runs ONLY the primary answerer (Gemini
+# Flash Lite, N=5) over the full split -- needs only GEMINI_API_KEY +
+# local Ollama. `slice` is the dress rehearsal; `full` resumes in place
+# over it. Add WITH_SECONDARY=1 to also run the grok-4-fast-reasoning
+# robustness slice (the only step needing XAI_API_KEY). Idempotent.
+#   make main-study-slice                    # primary only
+#   make main-study-slice WITH_SECONDARY=1   # + grok slice
 main-study-slice:
-	@bash scripts/run_main_study.sh slice
+	@WITH_SECONDARY=$(WITH_SECONDARY) bash scripts/run_main_study.sh slice
 
 main-study-full:
-	@bash scripts/run_main_study.sh full
+	@WITH_SECONDARY=$(WITH_SECONDARY) bash scripts/run_main_study.sh full
 
 step-3-summary:
 	@test -n "$(RUN)" || (echo "RUN=<run_id> is required" >&2; exit 1)

@@ -11,6 +11,12 @@
 #   scripts/run_main_study.sh slice   # dress rehearsal: 50 papers + 5 novels
 #   scripts/run_main_study.sh full    # full run (resumes IN PLACE over a prior slice)
 #
+# By default ONLY the primary answerer (Gemini Flash Lite) runs, which
+# needs just GEMINI_API_KEY + local Ollama. The grok-4-fast-reasoning
+# cross-vendor robustness slice (N=1) is a supplementary check and is
+# OPT-IN -- it is the only thing that needs XAI_API_KEY:
+#   WITH_SECONDARY=1 scripts/run_main_study.sh slice
+#
 # Idempotent and crash-safe. Re-run after a laptop crash to resume in
 # place: the same config maps to the same run dir, the append-only ledger
 # keeps every cost row, the per-chunk embed cache and per-document
@@ -69,17 +75,22 @@ $PYTHON -m pilot.cli.step_3_dry_run $COMMON \
   --answerer-provider google --answerer-model "$PRIMARY" \
   --num-runs 5
 
-echo "[main-study] === secondary robustness slice: $SECONDARY (N=1) ==="
-# The secondary reuses the primary's cached retrieved context: the
-# preprocess cache key is keyed by summary model + encoder, NOT the
-# answerer, so --cache-required guarantees grok sees byte-identical
-# context and the only difference is the answerer call. (--cache-required
-# also aborts loudly if the primary's builds are incomplete, so run this
-# only after the primary pass has finished.)
-# shellcheck disable=SC2086
-$PYTHON -m pilot.cli.step_3_dry_run $COMMON \
-  --answerer-provider xai --answerer-model "$SECONDARY" \
-  --run-index 0 --cache-required
+if [ "${WITH_SECONDARY:-0}" = "1" ]; then
+  echo "[main-study] === secondary robustness slice: $SECONDARY (N=1) ==="
+  # The secondary reuses the primary's cached retrieved context: the
+  # preprocess cache key is keyed by summary model + encoder, NOT the
+  # answerer, so --cache-required guarantees grok sees byte-identical
+  # context and the only difference is the answerer call. (--cache-required
+  # also aborts loudly if the primary's builds are incomplete, so run this
+  # only after the primary pass has finished.) Requires XAI_API_KEY.
+  # shellcheck disable=SC2086
+  $PYTHON -m pilot.cli.step_3_dry_run $COMMON \
+    --answerer-provider xai --answerer-model "$SECONDARY" \
+    --run-index 0 --cache-required
+else
+  echo "[main-study] secondary grok robustness slice SKIPPED."
+  echo "[main-study]   (opt in with WITH_SECONDARY=1; that step is the only one needing XAI_API_KEY.)"
+fi
 
 echo "[main-study] done ($MODE)."
 echo "[main-study] Record the exact grok-4-fast-reasoning build id in the run manifest."
