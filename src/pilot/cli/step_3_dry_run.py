@@ -151,6 +151,24 @@ def _write_manifest(run_dir: Path, manifest: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _append_build_failure(run_dir: Path, record: dict[str, Any]) -> None:
+    """Append one structured build-failure record to build_failures.jsonl.
+
+    Diagnostic log of every (arch, paper, question, run_index) cell whose
+    preprocessing/answer build failed, with the reason. Lets the operator
+    audit the failure rate and selectively re-drive specific cells, and
+    keeps the failures visible rather than buried as empty predictions.
+    """
+    path = run_dir / "build_failures.jsonl"
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except (OSError, AttributeError):
+            pass
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
@@ -545,6 +563,7 @@ def run_dry_run(
         run_dir, architectures
     )
     failures: list[dict[str, Any]] = []
+    build_failures_count: dict[str, int] = defaultdict(int)
 
     if completed:
         print(
@@ -731,11 +750,24 @@ def run_dry_run(
                         "dataset": item["dataset"],
                         "paper_id": item["paper_id"],
                         "question_id": item["question_id"],
+                        "run_index": run_index,
                         "error": repr(exc),
                         "traceback": traceback.format_exc(),
                     })
                     print(f"[step3-dry-run] FAIL {tag}: {exc!r}", file=sys.stderr)
-                    continue
+                    # Do NOT silently drop the cell. Fall through with a
+                    # synthetic failed result so it is scored as wrong
+                    # (denominator parity with Flat/Naive, which never fail
+                    # to build) and written + counted as a build failure
+                    # rather than vanishing from the analysis. A vanished
+                    # cell would silently thin this architecture's
+                    # denominator and bias the cross-architecture ranking.
+                    result = ArchitectureResult(
+                        architecture=arch,
+                        predicted_answer="",
+                        failed=True,
+                        failure_reason=repr(exc),
+                    )
 
                 # Cache the preprocessing artefact for future questions
                 # on this paper. Only RAPTOR/GraphRAG return a non-None
@@ -815,6 +847,26 @@ def run_dry_run(
                     "retrieved_chunks_count": len(result.retrieved_evidence_sentences),
                     **scores,
                 }
+                # A build/answer failure is recorded as an explicit,
+                # COUNTED cell (the scored row above keeps it in the
+                # denominator) and flagged so a reviewer can tell the
+                # accuracy is not over a survivorship-filtered subset.
+                # The structured build_failures.jsonl + per-arch counter
+                # make the failure rate visible instead of silent.
+                if result.failed:
+                    row["build_failed"] = True
+                    row["failure_reason"] = result.failure_reason
+                    build_failures_count[arch] += 1
+                    _append_build_failure(run_dir, {
+                        "architecture": arch,
+                        "dataset": item["dataset"],
+                        "paper_id": paper_id,
+                        "question_id": item["question_id"],
+                        "run_index": run_index,
+                        "failure_reason": result.failure_reason,
+                        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    })
+                    print(f"[step3-dry-run] BUILD-FAIL {tag}: {result.failure_reason}", file=sys.stderr)
                 per_arch_predictions[arch].append(row)
                 # Crash-safe incremental flush. fsync forces the OS
                 # buffer cache to disk so a power loss after the line
@@ -903,6 +955,8 @@ def run_dry_run(
         "per_arch_macro": macro,
         "failures_count": len(failures),
         "failures": failures,
+        "build_failures_total": sum(build_failures_count.values()),
+        "build_failures_per_arch": dict(build_failures_count),
         "ledger_path": str(ledger.path),
         "predictions_dir": str(ledger.run_dir),
     }
@@ -914,6 +968,7 @@ def run_dry_run(
     run_manifest["status"] = "complete"
     run_manifest["completed_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     run_manifest["failures_count"] = len(failures)
+    run_manifest["build_failures_total"] = sum(build_failures_count.values())
     _write_manifest(run_dir, run_manifest)
     return summary
 

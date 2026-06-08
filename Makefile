@@ -23,7 +23,7 @@ export NUMBA_NUM_THREADS := 1
 	step-3-dry-run-flat step-3-dry-run-naive-rag \
 	step-3-dry-run-raptor step-3-dry-run-graphrag \
 	step-3-summary step-4-variance phase-f-kendall phase-f-pareto \
-	resume-phase-f1-v2 \
+	resume-phase-f1-v2 completeness-check \
 	data-download build-calibration \
 	codabench-format codabench-submit codabench-extract
 
@@ -56,6 +56,19 @@ step-3-dry-run-raptor:
 
 step-3-dry-run-graphrag:
 	@$(PYTHON) -m pilot.cli.step_3_dry_run --architectures graphrag
+
+# Completeness gate: verify a run dir has every expected
+# (arch, paper, question, run_index) cell before scoring. Exits non-zero
+# on a ragged grid so a launcher can re-run (resume-in-place fills the
+# gaps) before the Kendall / accuracy / variance scorers run.
+#   make completeness-check RUN=<run_id> [NUM_RUNS=5] [DATASETS="qasper novelqa"]
+completeness-check:
+	@test -n "$(RUN)" || (echo "RUN=<run_id> is required" >&2; exit 1)
+	@$(PYTHON) -m pilot.cli.completeness_check \
+		--run-dir outputs/runs/$(RUN) \
+		$(if $(ARCHS),--architectures $(ARCHS),) \
+		$(if $(DATASETS),--datasets $(DATASETS),) \
+		$(if $(NUM_RUNS),--num-runs $(NUM_RUNS),)
 
 step-3-summary:
 	@test -n "$(RUN)" || (echo "RUN=<run_id> is required" >&2; exit 1)
