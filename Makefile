@@ -24,6 +24,7 @@ export NUMBA_NUM_THREADS := 1
 	step-3-dry-run-raptor step-3-dry-run-graphrag \
 	step-3-summary step-4-variance phase-f-kendall phase-f-pareto \
 	resume-phase-f1-v2 completeness-check \
+	main-study-slice main-study-full \
 	data-download build-calibration \
 	codabench-format codabench-submit codabench-extract
 
@@ -69,6 +70,15 @@ completeness-check:
 		$(if $(ARCHS),--architectures $(ARCHS),) \
 		$(if $(DATASETS),--datasets $(DATASETS),) \
 		$(if $(NUM_RUNS),--num-runs $(NUM_RUNS),)
+
+# Main-study launcher: single-answerer (Flash Lite N=5) + grok robustness
+# slice (N=1) over the full split. `slice` is the dress rehearsal; `full`
+# resumes in place over it. Idempotent and crash-safe.
+main-study-slice:
+	@bash scripts/run_main_study.sh slice
+
+main-study-full:
+	@bash scripts/run_main_study.sh full
 
 step-3-summary:
 	@test -n "$(RUN)" || (echo "RUN=<run_id> is required" >&2; exit 1)
