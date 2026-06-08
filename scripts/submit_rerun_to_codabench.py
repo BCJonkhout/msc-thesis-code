@@ -47,6 +47,13 @@ sys.path.insert(0, str(CODE_ROOT / "src"))
 from pilot.env import load_env  # noqa: E402
 from pilot.codabench.format import write_submission_zip  # noqa: E402
 from pilot.codabench.submit import submit_zip  # noqa: E402
+from pilot.codabench.idempotency import (  # noqa: E402
+    already_submitted,
+    atomic_write_json,
+    job_key,
+    load_prior_records,
+    split_results,
+)
 from pilot.codabench.extract_score import (  # noqa: E402
     fetch_correctness_strings,
     _calibration_indices,
@@ -289,8 +296,7 @@ def build_jobs() -> list[dict[str, Any]]:
 
 
 def _flush(payload: dict[str, Any]) -> None:
-    OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    OUT_JSON.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_json(OUT_JSON, payload)
 
 
 def main() -> int:
@@ -299,33 +305,58 @@ def main() -> int:
 
     cal_qids = calibration_qids_n15()
     jobs = build_jobs()
-    print(f"planned submissions: {len(jobs)}", flush=True)
-    for j in jobs:
-        print(f"  {j['candidate']}/{j['architecture']} <- {j['rerun_run_id']}", flush=True)
 
-    submissions: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
+    # Idempotent re-run. Load prior results and skip any job that already
+    # carries a Codabench submission id: re-submitting would duplicate
+    # against the throttled queue, and starting from an empty payload
+    # would overwrite already-recovered gold scores. Failed jobs (no
+    # submission id) are retried. New outcomes are merged into the
+    # results dict keyed by (candidate, architecture).
+    results: dict[tuple[str, str], dict[str, Any]] = load_prior_records(OUT_JSON)
+    pending = [
+        j for j in jobs
+        if not already_submitted(results.get((j["candidate"], j["architecture"])))
+    ]
+    skipped = len(jobs) - len(pending)
+    print(
+        f"planned: {len(jobs)} | already submitted (skipped): {skipped} | "
+        f"pending: {len(pending)}",
+        flush=True,
+    )
+    for j in pending:
+        print(f"  pending: {j['candidate']}/{j['architecture']} <- {j['rerun_run_id']}",
+              flush=True)
+
     started_at = datetime.now(timezone.utc).isoformat()
-    payload: dict[str, Any] = {
-        "submitted_at": started_at,
-        "calibration_pool_qids_n15": cal_qids,
-        "n_qids": len(cal_qids),
-        "included_novels": list(INCLUDED_NOVELS),
-        "batch_size": BATCH_SIZE,
-        "inter_batch_sleep_s": INTER_BATCH_SLEEP_S,
-        "submissions": submissions,
-        "failures": failures,
-    }
-    _flush(payload)
-
     rate_limited_seen = False
     t_wall0 = time.monotonic()
 
-    # Batch the jobs
-    batches: list[list[dict[str, Any]]] = []
-    for i in range(0, len(jobs), BATCH_SIZE):
-        batches.append(jobs[i : i + BATCH_SIZE])
+    def _persist(extra: dict[str, Any] | None = None) -> None:
+        subs, fails = split_results(results)
+        payload: dict[str, Any] = {
+            "submitted_at": started_at,
+            "calibration_pool_qids_n15": cal_qids,
+            "n_qids": len(cal_qids),
+            "included_novels": list(INCLUDED_NOVELS),
+            "batch_size": BATCH_SIZE,
+            "inter_batch_sleep_s": INTER_BATCH_SLEEP_S,
+            "submissions": subs,
+            "failures": fails,
+            "n_total": len(jobs),
+            "n_skipped_already_submitted": skipped,
+            "n_succeeded": len(subs),
+            "n_failed": len(fails),
+        }
+        if extra:
+            payload.update(extra)
+        _flush(payload)
 
+    _persist()
+
+    # Batch the PENDING jobs only.
+    batches: list[list[dict[str, Any]]] = [
+        pending[i : i + BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)
+    ]
     for b_idx, batch in enumerate(batches, start=1):
         t_batch0 = time.monotonic()
         print(f"\n=== batch {b_idx}/{len(batches)} ({len(batch)} jobs) ===",
@@ -344,17 +375,15 @@ def main() -> int:
                         "error": f"worker exception: {exc!r}",
                         "traceback": traceback.format_exc(),
                     }
+                results[job_key(record)] = record
                 if record.get("submission_id") and not record.get("error"):
-                    submissions.append(record)
                     cb_acc = record.get("codabench_accuracy_calibration_only_n15")
                     print(
                         f"  ok: {j['candidate']:>34s}/{j['architecture']:<8s} "
-                        f"sub_id={record['submission_id']} "
-                        f"cal_acc={cb_acc}",
+                        f"sub_id={record['submission_id']} cal_acc={cb_acc}",
                         flush=True,
                     )
                 else:
-                    failures.append(record)
                     print(
                         f"  FAIL: {j['candidate']}/{j['architecture']}: "
                         f"{record.get('error', record.get('status'))}",
@@ -363,8 +392,8 @@ def main() -> int:
                 if record.get("rate_limited"):
                     rate_limited_seen = True
 
-        # Persist after each batch.
-        _flush(payload)
+        # Persist the merged results after each batch.
+        _persist()
         print(f"  batch wallclock: {time.monotonic() - t_batch0:.1f}s", flush=True)
 
         if b_idx < len(batches):
@@ -372,21 +401,19 @@ def main() -> int:
             time.sleep(INTER_BATCH_SLEEP_S)
 
     total_wall = time.monotonic() - t_wall0
-    payload["completed_at"] = datetime.now(timezone.utc).isoformat()
-    payload["wallclock_seconds"] = round(total_wall, 1)
-    payload["rate_limit_observed"] = rate_limited_seen
-    payload["n_submitted"] = len(jobs)
-    payload["n_succeeded"] = len(submissions)
-    payload["n_failed"] = len(failures)
-    _flush(payload)
-
+    _persist({
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "wallclock_seconds": round(total_wall, 1),
+        "rate_limit_observed": rate_limited_seen,
+    })
+    subs, fails = split_results(results)
     print(
-        f"\ndone: {len(submissions)} ok / {len(failures)} failed / "
-        f"{len(jobs)} total, wallclock {total_wall:.1f}s",
+        f"\ndone: {len(subs)} ok / {len(fails)} failed / {len(jobs)} total "
+        f"({skipped} skipped as already-submitted), wallclock {total_wall:.1f}s",
         flush=True,
     )
     print(f"wrote {OUT_JSON}", flush=True)
-    return 0 if not failures else 2
+    return 0 if not fails else 2
 
 
 if __name__ == "__main__":
