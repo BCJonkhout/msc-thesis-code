@@ -101,6 +101,7 @@ def canonical_run_id(
     architectures: list[str],
     prompt_style: str,
     naive_rag_top_k: int,
+    split: str = "calibration",
 ) -> str:
     """Deterministic run id derived from the experiment configuration.
 
@@ -110,6 +111,11 @@ def canonical_run_id(
     only the rest. ``run_index`` is deliberately EXCLUDED so all N
     repeats share one dir (the per-row ``run_index`` field distinguishes
     them and the append-only ledger keeps every repeat's cost rows).
+
+    ``split`` IS part of the identity (calibration vs full are different
+    question sets), but the validation-slice size (``max_docs``) is NOT:
+    a slice and the full run share one dir, so the full run resumes-in-
+    place over the slice's already-completed cells and reuses its caches.
     """
     payload = {
         "answerer_provider": answerer_provider,
@@ -121,12 +127,13 @@ def canonical_run_id(
         "architectures": sorted(architectures),
         "prompt_style": prompt_style,
         "naive_rag_top_k": naive_rag_top_k,
+        "split": split,
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
     ).hexdigest()[:12]
     return (
-        f"main-{_slug(answerer_model)}-"
+        f"main-{split}-{_slug(answerer_model)}-"
         f"{'-'.join(sorted(datasets))}-{prompt_style}-{digest}"
     )
 
@@ -195,6 +202,47 @@ def _linearise_paper(paper: dict[str, Any]) -> str:
 # Dataset loaders
 # ──────────────────────────────────────────────────────────────────────
 
+def _qasper_gold(qa: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Extract (gold_answers, gold_evidence_sentences) from a QASPER qa.
+
+    Free-form answer text per the QASPER schema: prefer free_form_answer,
+    fall back to joined extractive_spans, then Yes/No, then "" for
+    unanswerable. Evidence is the union of highlighted_evidence sentences.
+    """
+    gold_answers: list[str] = []
+    gold_evidence: list[str] = []
+    for ans in qa.get("answers", []) or []:
+        a = ans.get("answer", {})
+        if not isinstance(a, dict):
+            continue
+        ff = a.get("free_form_answer") or ""
+        if ff and ff.strip():
+            gold_answers.append(ff.strip())
+        elif a.get("extractive_spans"):
+            gold_answers.append(" ".join(s for s in a["extractive_spans"] if s))
+        elif a.get("yes_no") is True:
+            gold_answers.append("Yes")
+        elif a.get("yes_no") is False:
+            gold_answers.append("No")
+        elif a.get("unanswerable"):
+            gold_answers.append("")  # empty string == "no answer"
+        gold_evidence.extend(s for s in (a.get("highlighted_evidence") or []) if s)
+    return gold_answers, gold_evidence
+
+
+def _calibration_qids(data_root: Path, dataset: str) -> set[str]:
+    """Question ids in a dataset's calibration pool.
+
+    Excluded from the full evaluation split so calibration questions
+    (used to fix thresholds / measure variance) never leak into the
+    main-study evaluation set.
+    """
+    path = data_root / dataset / "calibration_pool.jsonl"
+    if not path.exists():
+        return set()
+    return {row["question_id"] for row in _load_jsonl(path) if row.get("question_id")}
+
+
 def load_qasper_calibration(data_root: Path) -> list[dict[str, Any]]:
     """Return one work item per calibration question with full context.
 
@@ -222,27 +270,7 @@ def load_qasper_calibration(data_root: Path) -> list[dict[str, Any]]:
         if qa is None:
             continue
 
-        gold_answers: list[str] = []
-        gold_evidence: list[str] = []
-        for ans in qa.get("answers", []) or []:
-            a = ans.get("answer", {})
-            if not isinstance(a, dict):
-                continue
-            # Free-form answer text per QASPER schema: prefer free_form_answer,
-            # fall back to extractive_spans joined, then to "Yes"/"No" for yes/no.
-            ff = a.get("free_form_answer") or ""
-            if ff and ff.strip():
-                gold_answers.append(ff.strip())
-            elif a.get("extractive_spans"):
-                gold_answers.append(" ".join(s for s in a["extractive_spans"] if s))
-            elif a.get("yes_no") is True:
-                gold_answers.append("Yes")
-            elif a.get("yes_no") is False:
-                gold_answers.append("No")
-            elif a.get("unanswerable"):
-                gold_answers.append("")  # empty string == "no answer"
-
-            gold_evidence.extend(s for s in (a.get("highlighted_evidence") or []) if s)
+        gold_answers, gold_evidence = _qasper_gold(qa)
 
         items.append({
             "dataset": "qasper",
@@ -287,6 +315,116 @@ def load_novelqa_calibration(data_root: Path) -> list[dict[str, Any]]:
             "gold_evidence_sentences": [], # not available
             "gold_label": None,            # leaderboard-only
         })
+    return items
+
+
+def load_qasper_full(
+    data_root: Path,
+    *,
+    exclude_calibration: bool = True,
+    min_queries: int = 2,
+    max_docs: int | None = None,
+) -> list[dict[str, Any]]:
+    """Full QASPER evaluation split: the dev papers minus the calibration
+    questions (the main study's "validation split").
+
+    Eligibility: only papers with at least ``min_queries`` remaining
+    questions are kept, because repeated-context cost is undefined for a
+    single-query document. ``max_docs`` caps to the first N eligible
+    papers in sorted paper-id order, so a validation slice is a
+    deterministic PREFIX of the full split: a later full run reopens the
+    same run dir and resumes-in-place over the slice's cells rather than
+    redoing them.
+    """
+    papers = sorted(
+        _load_jsonl(data_root / "qasper" / "dev.jsonl"),
+        key=lambda p: p["paper_id"],
+    )
+    exclude = _calibration_qids(data_root, "qasper") if exclude_calibration else set()
+    items: list[dict[str, Any]] = []
+    eligible = 0
+    for paper in papers:
+        paper_id = paper["paper_id"]
+        paper_items: list[dict[str, Any]] = []
+        for qa in paper.get("qas", []) or []:
+            qid = qa.get("question_id")
+            if not qid or qid in exclude:
+                continue
+            gold_answers, gold_evidence = _qasper_gold(qa)
+            paper_items.append({
+                "dataset": "qasper",
+                "paper_id": paper_id,
+                "question_id": qid,
+                "question": qa["question"],
+                "options": None,
+                "document": _linearise_paper(paper),
+                "gold_answers": gold_answers,
+                "gold_evidence_sentences": gold_evidence,
+                "gold_label": None,
+            })
+        if len(paper_items) < min_queries:
+            continue
+        items.extend(paper_items)
+        eligible += 1
+        if max_docs is not None and eligible >= max_docs:
+            break
+    return items
+
+
+def load_novelqa_full(
+    data_root: Path,
+    *,
+    exclude_calibration: bool = True,
+    exclude_b48: bool = True,
+    min_queries: int = 2,
+    max_docs: int | None = None,
+) -> list[dict[str, Any]]:
+    """Full NovelQA evaluation split: every public-domain novel's
+    questions (minus the calibration questions and the B48 outlier),
+    scored later against Codabench gold.
+
+    ``max_docs`` caps to the first N eligible novels in sorted novel-id
+    order, so a validation slice is a deterministic PREFIX of the full
+    split and a later full run resumes-in-place over the same cells.
+    """
+    rows = _load_jsonl(data_root / "novelqa" / "questions.jsonl")
+    exclude = _calibration_qids(data_root, "novelqa") if exclude_calibration else set()
+    full_texts_dir = data_root / "novelqa" / "full_texts"
+
+    by_novel: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for q in rows:
+        novel_id = q["novel_id"]
+        if exclude_b48 and novel_id == "B48":
+            continue
+        if q.get("question_id") in exclude:
+            continue
+        by_novel[novel_id].append(q)
+
+    items: list[dict[str, Any]] = []
+    eligible = 0
+    for novel_id in sorted(by_novel):
+        qs = by_novel[novel_id]
+        if len(qs) < min_queries:
+            continue
+        text_path = full_texts_dir / f"{novel_id}.txt"
+        if not text_path.exists():
+            continue
+        document = text_path.read_text(encoding="utf-8")
+        for q in qs:
+            items.append({
+                "dataset": "novelqa",
+                "paper_id": novel_id,
+                "question_id": q["question_id"],
+                "question": q["Question"],
+                "options": q.get("Options") or {},
+                "document": document,
+                "gold_answers": [],
+                "gold_evidence_sentences": [],
+                "gold_label": None,
+            })
+        eligible += 1
+        if max_docs is not None and eligible >= max_docs:
+            break
     return items
 
 
@@ -503,19 +641,35 @@ def run_dry_run(
     run_id: str | None = None,
     run_index: int = 0,
     runs_root: Path | None = None,
+    split: str = "calibration",
+    max_docs_per_dataset: dict[str, int] | None = None,
     summary_provider: str | None = None,
     summary_model: str | None = None,
     cache_required: bool = False,
     cache_root: Path | None = None,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
-    if "qasper" in datasets:
-        items.extend(load_qasper_calibration(data_root))
-    if "novelqa" in datasets:
-        items.extend(load_novelqa_calibration(data_root))
+    if split == "full":
+        # Main-study evaluation split. A validation slice (per-dataset
+        # max_docs) is a deterministic PREFIX of the full split sharing
+        # the same run dir, so expanding to the full run resumes-in-place
+        # over it rather than redoing it.
+        caps = max_docs_per_dataset or {}
+        if "qasper" in datasets:
+            items.extend(load_qasper_full(data_root, max_docs=caps.get("qasper")))
+        if "novelqa" in datasets:
+            items.extend(load_novelqa_full(data_root, max_docs=caps.get("novelqa")))
+    else:
+        if "qasper" in datasets:
+            items.extend(load_qasper_calibration(data_root))
+        if "novelqa" in datasets:
+            items.extend(load_novelqa_calibration(data_root))
 
     if not items:
-        raise SystemExit("calibration pool is empty; run make build-calibration")
+        raise SystemExit(
+            "evaluation pool is empty; for split=calibration run "
+            "`make build-calibration`, for split=full run `make data-download`"
+        )
 
     answerer = get_provider(answerer_provider)
 
@@ -549,6 +703,7 @@ def run_dry_run(
             architectures=architectures,
             prompt_style=prompt_style,
             naive_rag_top_k=naive_rag_top_k,
+            split=split,
         )
     ledger = CostLedger(run_id=run_id, root=runs_root)
     run_dir = ledger.run_dir
@@ -592,6 +747,9 @@ def run_dry_run(
         "embedder_model": embedder_model,
         "naive_rag_top_k": naive_rag_top_k,
         "prompt_style": prompt_style,
+        "split": split,
+        "max_docs_per_dataset": max_docs_per_dataset,
+        "n_items": len(items),
         "run_index": run_index,
         "started_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -1104,6 +1262,40 @@ def main() -> int:
             "checkout directories."
         ),
     )
+    parser.add_argument(
+        "--split",
+        choices=["calibration", "full"],
+        default="calibration",
+        help=(
+            "Which evaluation pool to run. 'calibration' (default) is the "
+            "20+20 pilot calibration pools. 'full' is the main-study "
+            "evaluation split: QASPER dev minus calibration (~1,005 "
+            "questions; papers with >=2 questions) and all public-domain "
+            "NovelQA novels except B48. Calibration questions and B48 are "
+            "excluded to avoid leakage / outlier distortion."
+        ),
+    )
+    parser.add_argument(
+        "--max-docs-qasper",
+        type=int,
+        default=None,
+        help=(
+            "Cap QASPER to the first N eligible papers (sorted by id) for "
+            "a validation slice. Omit for the full split."
+        ),
+    )
+    parser.add_argument(
+        "--max-docs-novelqa",
+        type=int,
+        default=None,
+        help=(
+            "Cap NovelQA to the first N eligible novels (sorted by id) for "
+            "a validation slice. The slice is a deterministic PREFIX of "
+            "the full split and shares the full run's dir, so dropping "
+            "these caps later expands to the full run by resuming in "
+            "place over the slice's completed cells (no rework)."
+        ),
+    )
     args = parser.parse_args()
 
     # Resolve the run directory. Resume-in-place: the SAME config maps to
@@ -1137,6 +1329,13 @@ def main() -> int:
             run_id=run_id,
             run_index=ri,
             runs_root=runs_root,
+            split=args.split,
+            max_docs_per_dataset={
+                k: v for k, v in (
+                    ("qasper", args.max_docs_qasper),
+                    ("novelqa", args.max_docs_novelqa),
+                ) if v is not None
+            },
             summary_provider=args.summary_provider,
             summary_model=args.summary_model,
             cache_required=args.cache_required,
