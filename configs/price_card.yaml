@@ -35,12 +35,24 @@ storage:
     source: pilot:6
 
 # ─── Local-equivalent GPU rate (locked) ───────────────────────────────────────
+# The local embedding model (BGE-M3 via Ollama) runs on the experiment
+# laptop's RTX 4070. Local GPU-seconds are billed at a community-cloud rate
+# for a comparable consumer GPU so the local-compute term stays
+# deployment-comparable to the cloud LLM costs -- a small embedding model
+# would be served on a consumer / L4-class GPU, never an H100. The measured
+# seconds are 4070 seconds, so the rate must be a 4070-class rate; billing
+# them at an H100 rate would mix one GPU's runtime with another's price.
 gpu:
-  h100_usd_per_hour:
-    value: 2.00
-    source: rule:lambda-public-list-2026-04
-    description: Lambda Cloud public list price for H100 PCIe as of 2026-04
-  h100_usd_per_second: 0.000556
+  device: rtx-4070-laptop
+  usd_per_hour:
+    value: 0.30
+    source: rule:consumer-gpu-community-cloud-2026-06
+    description: >
+      Community-cloud hourly rate for a comparable consumer GPU
+      (RTX 4070 / 4080-class, ~$0.20-0.40/hr). Thesis default informed by
+      public community GPU-cloud list prices; the exact value is a protocol
+      default rather than a single canonical SKU.
+  usd_per_second: 0.0000833
 
 # ─── Provider rate cards (verified 2026-04-29; verify on every run) ───────────
 # All rates in USD per 1M tokens unless noted.

@@ -15,7 +15,7 @@
 # run dir; append-only ledger + per-chunk caches preserved). The slice
 # shares the full run's dir, so `full` continues from the slice with no rework.
 param(
-    [ValidateSet('slice', 'full')]
+    [ValidateSet('slice', 'full', 'variance')]
     [string]$Mode = 'slice',
     [switch]$WithSecondary
 )
@@ -58,11 +58,23 @@ $common = @(
     '--summary-provider', 'google', '--summary-model', $summary,
     '--prompt-style', 'literature'
 )
+# N protocol: the full run is N=1 over all questions -- the headline
+# uncertainty is question-sampling, carried by bootstrap CIs over questions
+# and paired architecture-vs-architecture tests at scoring time. Run-to-run
+# API variance is a smaller, separate term, characterised by the `variance`
+# mode: N=5 on a small doc subset whose builds the full run already cached.
+$numRuns = 1
+$cacheRequired = $false
 if ($Mode -eq 'slice') {
     $common += @('--max-docs-qasper', '50', '--max-docs-novelqa', '5')
-    Write-Host '[main-study] MODE=slice (50 QASPER papers + 5 NovelQA novels)'
+    Write-Host '[main-study] MODE=slice (rehearsal: 50 QASPER papers + 5 NovelQA novels, N=1)'
+} elseif ($Mode -eq 'variance') {
+    $common += @('--max-docs-qasper', '10', '--max-docs-novelqa', '1')
+    $numRuns = 5
+    $cacheRequired = $true
+    Write-Host '[main-study] MODE=variance (N=5 run-to-run variance subset; reuses full-run builds via --cache-required)'
 } else {
-    Write-Host '[main-study] MODE=full (resumes in place over any prior slice)'
+    Write-Host '[main-study] MODE=full (N=1 over all questions; resumes in place over any prior slice)'
 }
 
 $base = @('-m', 'pilot.cli.step_3_dry_run') + $common
@@ -103,7 +115,8 @@ function Invoke-RunWithResume {
 }
 
 Write-Host "[main-study] === primary answerer: $primary (N=5) ==="
-$primaryArgs = $base + @('--answerer-provider', 'google', '--answerer-model', $primary, '--num-runs', '5')
+$primaryArgs = $base + @('--answerer-provider', 'google', '--answerer-model', $primary, '--num-runs', "$numRuns")
+if ($cacheRequired) { $primaryArgs += '--cache-required' }
 if (-not (Invoke-RunWithResume -RunArgs $primaryArgs -Label 'primary')) { exit 1 }
 
 if ($WithSecondary) {

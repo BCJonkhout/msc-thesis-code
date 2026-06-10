@@ -53,7 +53,9 @@ def _row_cost_usd(row: CallRecord, price_card: dict[str, Any]) -> float:
        the price card; cost = token-based rate.
     2. **Local-equivalent row** — the row's model is not in the price
        card (e.g. ``bge-m3`` served by Ollama). We charge GPU wall-
-       clock at the locked H100 rate per ``configs/price_card.yaml#gpu``,
+       clock at the locked local-equivalent GPU rate (a consumer-GPU
+       community-cloud rate matching the experiment's RTX 4070) per
+       ``configs/price_card.yaml#gpu``,
        so the cost model in project.tex §3.4.1 ("Resource ledger" +
        "Price model") is honoured for open-weights / local-compute
        calls instead of being silently zeroed.
@@ -93,9 +95,11 @@ def _row_cost_usd(row: CallRecord, price_card: dict[str, Any]) -> float:
 
     # Local-equivalent path: charge GPU-seconds at the H100 rate.
     gpu_block = price_card.get("gpu") or {}
-    rate_per_s = gpu_block.get("h100_usd_per_second")
+    # Generic local-GPU rate; fall back to the legacy h100_* keys for
+    # back-compat with older price cards.
+    rate_per_s = gpu_block.get("usd_per_second") or gpu_block.get("h100_usd_per_second")
     if rate_per_s is None:
-        per_hour = gpu_block.get("h100_usd_per_hour")
+        per_hour = gpu_block.get("usd_per_hour") or gpu_block.get("h100_usd_per_hour")
         if isinstance(per_hour, dict):
             per_hour = per_hour.get("value")
         if per_hour is None:
