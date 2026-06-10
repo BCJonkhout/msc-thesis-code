@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -93,6 +94,10 @@ class CostLedger:
         self.run_dir = self.root / run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.run_dir / "ledger.jsonl"
+        # Serialise concurrent appends: RAPTOR's embed thread pool logs from
+        # multiple threads, and without this their writes can interleave and
+        # concatenate two JSON objects onto one line.
+        self._write_lock = threading.Lock()
 
     @contextmanager
     def log_call(
@@ -150,7 +155,7 @@ class CostLedger:
     def _write_row(self, rec: CallRecord, start: float) -> None:
         rec.timestamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         rec.wallclock_s = round(time.perf_counter() - start, 6)
-        with open(self.path, "a", encoding="utf-8") as f:
+        with self._write_lock, open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec.to_dict(), separators=(",", ":")))
             f.write("\n")
             f.flush()

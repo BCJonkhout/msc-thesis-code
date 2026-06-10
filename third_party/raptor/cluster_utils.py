@@ -59,7 +59,12 @@ def get_optimal_clusters(
     n_clusters = np.arange(1, max_clusters)
     bics = []
     for n in n_clusters:
-        gm = GaussianMixture(n_components=n, random_state=random_state)
+        # reg_covar above the sklearn 1e-6 default prevents "ill-defined
+        # empirical covariance" failures when a candidate cluster collapses on
+        # degenerate embeddings (seen on some long-document, e.g. NovelQA, leaf
+        # sets). Negligible for well-conditioned clusters, so well-formed cached
+        # trees are unaffected.
+        gm = GaussianMixture(n_components=n, random_state=random_state, reg_covar=1e-4)
         gm.fit(embeddings)
         bics.append(gm.bic(embeddings))
     optimal_clusters = n_clusters[np.argmin(bics)]
@@ -68,7 +73,7 @@ def get_optimal_clusters(
 
 def GMM_cluster(embeddings: np.ndarray, threshold: float, random_state: int = 0):
     n_clusters = get_optimal_clusters(embeddings)
-    gm = GaussianMixture(n_components=n_clusters, random_state=random_state)
+    gm = GaussianMixture(n_components=n_clusters, random_state=random_state, reg_covar=1e-4)
     gm.fit(embeddings)
     probs = gm.predict_proba(embeddings)
     labels = [np.where(prob > threshold)[0] for prob in probs]
