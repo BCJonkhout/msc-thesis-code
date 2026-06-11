@@ -2,19 +2,17 @@
 # Main-study launcher.
 #
 # Runs the single-answerer main study over the full evaluation split:
-#   - primary answerer gemini-3.1-flash-lite-preview at N=1 over all
-#     questions; the headline uncertainty (question-sampling) is carried by
-#     bootstrap CIs over questions + paired architecture tests at scoring
-#     time. A separate `variance` mode does N=5 on a small subset for a
-#     run-to-run variance footnote.
+#   - primary answerer gemini-3.1-flash-lite-preview at N=5 per cell
+#     (pre-registered). Builds run once (cached); the five answer passes
+#     reuse them. Question-level bootstrap CIs + paired architecture tests
+#     are computed over the N=5 grid at scoring time.
 #   - the grok-4-fast-reasoning cross-vendor robustness slice at N=1.
 # Split = full: QASPER dev minus calibration (papers with >=2 questions)
 # and all public-domain NovelQA novels except B48.
 #
 # Usage:
-#   scripts/run_main_study.sh slice    # dress rehearsal: 50 papers + 5 novels (N=1)
-#   scripts/run_main_study.sh full     # full run, N=1 (resumes IN PLACE over a prior slice)
-#   scripts/run_main_study.sh variance # N=5 run-to-run variance subset (after full; reuses builds)
+#   scripts/run_main_study.sh slice    # dress rehearsal: 50 papers + 5 novels (N=5)
+#   scripts/run_main_study.sh full     # full run, N=5 over all questions
 #
 # By default ONLY the primary answerer (Gemini Flash Lite) runs, which
 # needs just GEMINI_API_KEY + local Ollama. The grok-4-fast-reasoning
@@ -42,20 +40,14 @@ SECONDARY="grok-4-fast-reasoning"
 SUMMARY="gemini-3.1-flash-lite-preview"
 
 CAPS=""
-NUM_RUNS=1
-CACHE_REQ=""
+NUM_RUNS=5
 if [ "$MODE" = "slice" ]; then
   CAPS="--max-docs-qasper 50 --max-docs-novelqa 5"
-  echo "[main-study] MODE=slice (dress rehearsal: 50 QASPER papers + 5 NovelQA novels, N=1)"
-elif [ "$MODE" = "variance" ]; then
-  CAPS="--max-docs-qasper 10 --max-docs-novelqa 1"
-  NUM_RUNS=5
-  CACHE_REQ="--cache-required"
-  echo "[main-study] MODE=variance (N=5 run-to-run variance subset; reuses full builds)"
+  echo "[main-study] MODE=slice (dress rehearsal: 50 QASPER papers + 5 NovelQA novels, N=5)"
 elif [ "$MODE" = "full" ]; then
-  echo "[main-study] MODE=full (N=1 over all questions; resumes in place over any prior slice)"
+  echo "[main-study] MODE=full (N=5 over all questions)"
 else
-  echo "usage: $0 {slice|full|variance}" >&2
+  echo "usage: $0 {slice|full}" >&2
   exit 2
 fi
 
@@ -144,7 +136,7 @@ echo "[main-study] === primary answerer: $PRIMARY (N=5) ==="
 # shellcheck disable=SC2086
 run_with_resume "primary" $COMMON \
   --answerer-provider google --answerer-model "$PRIMARY" \
-  --num-runs $NUM_RUNS $CACHE_REQ || exit 1
+  --num-runs $NUM_RUNS || exit 1
 
 if [ "${WITH_SECONDARY:-0}" = "1" ]; then
   echo "[main-study] === secondary robustness slice: $SECONDARY (N=1) ==="

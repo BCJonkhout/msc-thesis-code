@@ -1,0 +1,12 @@
+Answer the multiple-choice question using the provided context.
+Always choose the single most likely option, even if the context is incomplete or does not fully contain the answer.
+
+Context:
+{context}
+
+Question: {query}
+
+Options:
+{options}
+
+Respond with only the letter of the correct option.

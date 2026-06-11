@@ -31,7 +31,9 @@ from typing import Any
 from pilot.cli.step_3_dry_run import (
     _project_root,
     load_novelqa_calibration,
+    load_novelqa_full,
     load_qasper_calibration,
+    load_qasper_full,
 )
 
 
@@ -41,13 +43,26 @@ def expected_cells(
     datasets: list[str],
     architectures: list[str],
     num_runs: int,
+    split: str = "calibration",
 ) -> set[tuple[str, str, str, int]]:
-    """The full grid of (arch, paper_id, question_id, run_index) cells."""
+    """The full grid of (arch, paper_id, question_id, run_index) cells.
+
+    ``split`` MUST match the split the run actually used: a 'full' run is
+    validated against the full loaders, a 'calibration' run against the
+    20+20 calibration pools. Validating a full run against the calibration
+    set would mark it COMPLETE while leaving the real grid unchecked.
+    """
     items: list[dict[str, Any]] = []
     if "qasper" in datasets:
-        items.extend(load_qasper_calibration(data_root))
+        items.extend(
+            load_qasper_full(data_root) if split == "full"
+            else load_qasper_calibration(data_root)
+        )
     if "novelqa" in datasets:
-        items.extend(load_novelqa_calibration(data_root))
+        items.extend(
+            load_novelqa_full(data_root) if split == "full"
+            else load_novelqa_calibration(data_root)
+        )
     cells: set[tuple[str, str, str, int]] = set()
     for it in items:
         for arch in architectures:
@@ -89,11 +104,12 @@ def missing_cells(
     datasets: list[str],
     architectures: list[str],
     num_runs: int,
+    split: str = "calibration",
 ) -> set[tuple[str, str, str, int]]:
     """Expected cells that are not present on disk."""
     expected = expected_cells(
         data_root=data_root, datasets=datasets,
-        architectures=architectures, num_runs=num_runs,
+        architectures=architectures, num_runs=num_runs, split=split,
     )
     return expected - present_cells(run_dir, architectures)
 
@@ -108,7 +124,22 @@ def main() -> int:
     parser.add_argument("--datasets", nargs="+", default=["qasper", "novelqa"])
     parser.add_argument("--num-runs", type=int, default=5)
     parser.add_argument("--data-root", type=Path, default=_project_root() / "data")
+    parser.add_argument(
+        "--split", choices=["calibration", "full"], default=None,
+        help="evaluation split the run used; if omitted, read from "
+             "run_manifest.json (fallback: calibration).",
+    )
     args = parser.parse_args()
+
+    split = args.split
+    if split is None:
+        manifest = args.run_dir / "run_manifest.json"
+        if manifest.exists():
+            try:
+                split = json.loads(manifest.read_text(encoding="utf-8")).get("split")
+            except (json.JSONDecodeError, OSError):
+                split = None
+        split = split or "calibration"
 
     missing = missing_cells(
         run_dir=args.run_dir,
@@ -116,6 +147,7 @@ def main() -> int:
         datasets=args.datasets,
         architectures=args.architectures,
         num_runs=args.num_runs,
+        split=split,
     )
     if not missing:
         print(f"[completeness] COMPLETE: {args.run_dir} has every expected cell")

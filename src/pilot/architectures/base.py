@@ -75,15 +75,23 @@ def _render_prompt(
       - "literature": a literature-standard concise-answer template
         without the abstention instruction. Used for benchmark
         comparability runs (Step 5 prompt-wording ablation per pilot
-        plan § 5 Step 5). MC questions also use the standard MC
-        template — letter-choice format is unchanged.
+        plan § 5 Step 5). MC questions parallel this: "literature"
+        selects a no-abstention MC template (always pick a letter),
+        "pilot" selects the abstention-bearing MC template.
 
-    Multiple-choice questions always use the MC template regardless
-    of ``prompt_style``; the MC format does not have the abstention
-    issue that motivates the dual-prompt comparison for free-form.
+    Under "literature" both free-form and MC drop the abstention
+    clause, so every architecture is forced to commit to an answer
+    and the cross-architecture comparison is not confounded by
+    differing abstention policies (forced-choice MC scores an
+    abstention as wrong on the held-out leaderboard anyway).
     """
     if options:
-        template = load_template("qa_multiplechoice")
+        mc_name = (
+            "qa_multiplechoice_literature"
+            if prompt_style == "literature"
+            else "qa_multiplechoice"
+        )
+        template = load_template(mc_name)
         return template.render(
             context=context,
             query=query,

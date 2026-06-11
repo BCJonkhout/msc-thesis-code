@@ -84,7 +84,10 @@ def _cost_per_arch(run_dir: Path, price_card: dict) -> dict[str, dict]:
             line = line.strip()
             if not line:
                 continue
-            d = json.loads(line)
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # tolerate torn/concatenated lines from N>1 appends
             if d.get("run_index", 0) != 0 or d.get("failed"):
                 continue
             row = CallRecord(**{

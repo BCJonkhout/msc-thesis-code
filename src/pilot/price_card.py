@@ -123,7 +123,12 @@ def compute(ledger_path: Path, price_card: dict[str, Any]) -> float:
             line = line.strip()
             if not line:
                 continue
-            d = json.loads(line)
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                # Tolerate torn/concatenated lines from concurrent N>1
+                # ledger appends; affected rows are skipped, not crashed on.
+                continue
             if d.get("run_index", 0) != 0:
                 continue
             row = CallRecord(**{k: d.get(k) for k in CallRecord.__dataclass_fields__})

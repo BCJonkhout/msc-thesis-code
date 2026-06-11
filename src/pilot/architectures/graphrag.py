@@ -1075,6 +1075,7 @@ def run_graphrag(
     max_tokens: int = 256,
     summary_model: str | None = None,
     summary_answerer: AnswererProvider | None = None,
+    prompt_style: str = "pilot",
     cached_state: _GraphRAGState | None = None,
 ) -> ArchitectureResult:
     """Run the faithful GraphRAG local-search pipeline.
@@ -1181,8 +1182,11 @@ def run_graphrag(
         embedder=embedder, ledger=ledger, run_index=run_index,
     )
 
-    # 6. Final answer call against the packed context.
-    prompt = _render_prompt(context=context, query=query, options=options)
+    # 6. Final answer call against the packed context. Same shared
+    # prompt contract (and prompt_style) as the other architectures.
+    prompt = _render_prompt(
+        context=context, query=query, options=options, prompt_style=prompt_style
+    )
     with ledger.log_call(
         architecture="graphrag",
         stage=Stage.GENERATE,

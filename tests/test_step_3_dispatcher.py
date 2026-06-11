@@ -187,12 +187,12 @@ class TestPromptStyleThreading:
         )
         assert stub_dependencies["flat"][0]["prompt_style"] == "pilot"
 
-    def test_raptor_does_not_receive_prompt_style(
-        self, fake_item, stub_dependencies
-    ):
-        """RAPTOR uses its own paper-verbatim prompts; the dispatcher
-        should not pass prompt_style to it (the call signature
-        wouldn't accept it)."""
+    def test_raptor_receives_prompt_style(self, fake_item, stub_dependencies):
+        """All four architectures share one answer-prompt regime: the
+        dispatcher threads prompt_style to RAPTOR so it answers through
+        the same _render_prompt templates as flat/naive_rag/graphrag.
+        (The earlier per-architecture prompt split was the dominant
+        QASPER Answer-F1 confound.)"""
         cli._invoke_architecture(
             "raptor", fake_item,
             answerer=MagicMock(), answerer_model="m",
@@ -200,8 +200,20 @@ class TestPromptStyleThreading:
             ledger=MagicMock(), naive_rag_top_k=8,
             prompt_style="literature",
         )
-        # The recorder captured all kwargs; prompt_style must not be in them.
-        assert "prompt_style" not in stub_dependencies["raptor"][0]
+        assert stub_dependencies["raptor"][0]["prompt_style"] == "literature"
+
+    def test_graphrag_receives_prompt_style(self, fake_item, stub_dependencies):
+        """GraphRAG previously fell through to the 'pilot' abstention
+        template; the dispatcher now threads prompt_style so it renders
+        the same literature template as the other architectures."""
+        cli._invoke_architecture(
+            "graphrag", fake_item,
+            answerer=MagicMock(), answerer_model="m",
+            embedder=MagicMock(), chunker=None,
+            ledger=MagicMock(), naive_rag_top_k=8,
+            prompt_style="literature",
+        )
+        assert stub_dependencies["graphrag"][0]["prompt_style"] == "literature"
 
 
 # ──────────────────────────────────────────────────────────────────────

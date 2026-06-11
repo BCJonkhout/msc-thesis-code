@@ -49,7 +49,10 @@ def _aggregate_run(run_dir: Path, price_card: dict[str, Any]) -> dict[str, Any]:
             line = line.strip()
             if not line:
                 continue
-            d = json.loads(line)
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # tolerate torn/concatenated lines from N>1 appends
             total_rows += 1
             if d.get("run_index", 0) != 0:
                 continue

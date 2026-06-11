@@ -49,7 +49,7 @@ from pathlib import Path
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
-from pilot.architectures.base import ArchitectureResult
+from pilot.architectures.base import ArchitectureResult, _render_prompt
 from pilot.encoders import OllamaEmbedder
 from pilot.ledger import CostLedger, Stage, sha256_hex
 from pilot.providers.base import AnswererProvider, CacheControl
@@ -215,43 +215,25 @@ class _LedgerSummarizationModel(BaseSummarizationModel):
 # QA adapter
 # ──────────────────────────────────────────────────────────────────────
 
-# Verbatim concatenation of the chat-API prompt used by the vendored
-# `raptor/QAModels.GPT4QAModel.answer_question` — the class that
-# Sarthi et al. 2024 used for the GPT-4 QASPER replication. The
-# vendored class issues a chat-completion with system + user
-# messages; our `AnswererProvider.call` accepts a single prompt
-# string, so we inline the system message at the top.
+# RAPTOR's answer call goes through the SHARED prompt contract
+# (``pilot.architectures.base._render_prompt``) so all four
+# architectures answer under one prompt regime for a given
+# ``prompt_style`` -- only the retrieved ``{context}`` differs.
 #
-# An earlier pilot draft of this file accidentally adopted the
-# legacy `GPT3QAModel` prompt from the same vendored repo (the
-# completion-API path with the "folloing" typo and the "answer in
-# less than 5-7 words" cap). That prompt is for `text-davinci-003`,
-# not GPT-4. The 5-7-word cap was structurally truncating QASPER
-# answers and is the load-bearing reason RAPTOR's apparent F1 sat
-# below Naive RAG on the calibration sweeps. Corrected to the
-# modern chat-API prompt for paper-faithful comparison.
-_RAPTOR_FREEFORM_PROMPT = (
-    "You are Question Answering Portal\n\n"
-    "Given Context: {context} Give the best full answer amongst the option "
-    "to question {question}"
-)
-# The MC prompt has no equivalent in the vendored repo (RAPTOR's
-# paper benchmarks are free-form QA). We mirror the system framing
-# and add the option-letter constraint that NovelQA / QuALITY
-# require for codabench-comparable scoring.
-_RAPTOR_MC_PROMPT = (
-    "You are Question Answering Portal\n\n"
-    "Given Context: {context}\n\n"
-    "Answer the following multiple-choice question by responding with the "
-    "single option letter (A, B, C, or D) of the correct answer:\n\n"
-    "{question}\n\n{options}"
-)
-
-
-def _format_options_block(options: dict[str, str] | None) -> str:
-    if not options:
-        return ""
-    return "\n".join(f"{k}. {options[k]}" for k in sorted(options))
+# Prompt history (audit trail): an early pilot draft used the vendored
+# ``GPT3QAModel`` completion prompt with a "less than 5-7 words" cap (a
+# text-davinci-003 artifact) that truncated QASPER answers; it was
+# replaced by the vendored ``GPT4QAModel`` "give the best full answer"
+# chat prompt, which over-corrected into verbose, preamble-laden
+# answers ("Based on the provided text...") that the QASPER token-F1
+# scorer (no preamble stripping) penalised on precision -- the
+# load-bearing reason RAPTOR's F1 sat far below the concise
+# architectures. Both per-arch RAPTOR prompts are retired in favour of
+# the shared ``_render_prompt`` templates (qa_freeform_literature /
+# qa_multiplechoice_literature under prompt_style='literature'), so
+# RAPTOR answers in the same concise, no-abstention format as flat /
+# naive_rag / graphrag and the QASPER comparison measures content, not
+# answer format.
 
 
 class _LedgerQAModel(BaseQAModel):
@@ -271,25 +253,26 @@ class _LedgerQAModel(BaseQAModel):
         ledger: CostLedger,
         run_index: int = 0,
         max_tokens: int = 256,
+        prompt_style: str = "pilot",
     ) -> None:
         self.answerer = answerer
         self.model = model
         self.ledger = ledger
         self.run_index = run_index
         self.max_tokens = max_tokens
+        self.prompt_style = prompt_style
         self.current_options: dict[str, str] | None = None
 
     def answer_question(self, context, question):
-        if self.current_options:
-            prompt = _RAPTOR_MC_PROMPT.format(
-                context=context,
-                question=question,
-                options=_format_options_block(self.current_options),
-            )
-        else:
-            prompt = _RAPTOR_FREEFORM_PROMPT.format(
-                context=context, question=question
-            )
+        # Shared answer-prompt contract: same templates as flat /
+        # naive_rag / graphrag, selected by ``prompt_style``. Only the
+        # retrieved ``context`` differs across architectures.
+        prompt = _render_prompt(
+            context=context,
+            query=question,
+            options=self.current_options,
+            prompt_style=self.prompt_style,
+        )
         with self.ledger.log_call(
             architecture="raptor",
             stage=Stage.GENERATE,
@@ -429,6 +412,7 @@ class _RaptorState:
         summary_model: str | None = None,
         run_index: int = 0,
         max_tokens: int = 256,
+        prompt_style: str = "pilot",
     ) -> "_RaptorState":
         """Rebuild ``ra`` + ``qa_adapter`` from the restored tree.
 
@@ -451,6 +435,7 @@ class _RaptorState:
             self.qa_adapter.ledger = ledger
             self.qa_adapter.run_index = run_index
             self.qa_adapter.max_tokens = max_tokens
+            self.qa_adapter.prompt_style = prompt_style
             return self
 
         tree = getattr(self, "_restored_tree", None)
@@ -479,6 +464,7 @@ class _RaptorState:
         qa_adapter = _LedgerQAModel(
             answerer=answerer, model=answerer_model,
             ledger=ledger, run_index=run_index, max_tokens=max_tokens,
+            prompt_style=prompt_style,
         )
 
         tb_cfg = ClusterTreeConfig(
@@ -529,6 +515,7 @@ def run_raptor(
     run_index: int = 0,
     max_tokens: int = 256,
     summary_answerer: AnswererProvider | None = None,
+    prompt_style: str = "pilot",
     cached_state: _RaptorState | None = None,
 ) -> ArchitectureResult:
     """Build a RAPTOR tree over ``document`` and answer ``query``.
@@ -572,6 +559,7 @@ def run_raptor(
             answerer=answerer, answerer_model=answerer_model,
             summary_answerer=summary_answerer, summary_model=summary_model,
             run_index=run_index, max_tokens=max_tokens,
+            prompt_style=prompt_style,
         )
         qa_adapter = cached_state.qa_adapter
         qa_adapter.current_options = options
@@ -589,6 +577,7 @@ def run_raptor(
         qa_adapter = _LedgerQAModel(
             answerer=answerer, model=answerer_model,
             ledger=ledger, run_index=run_index, max_tokens=max_tokens,
+            prompt_style=prompt_style,
         )
         qa_adapter.current_options = options
 

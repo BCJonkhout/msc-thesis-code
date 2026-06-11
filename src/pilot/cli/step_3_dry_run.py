@@ -509,6 +509,7 @@ def _invoke_architecture(
             embedder=embedder,
             ledger=ledger,
             run_index=run_index,
+            prompt_style=prompt_style,
             cached_state=cached_state,
         )
     if architecture == "graphrag":
@@ -525,6 +526,7 @@ def _invoke_architecture(
             embedder=embedder,
             ledger=ledger,
             run_index=run_index,
+            prompt_style=prompt_style,
             cached_state=cached_state,
         )
     raise ValueError(f"unsupported architecture: {architecture}")
