@@ -33,16 +33,68 @@ if (-not (Test-Path $python)) {
     exit 1
 }
 
-# Ollama liveness on the Windows host. We do NOT auto-start it -- manage
-# Ollama yourself ('ollama serve' + 'ollama pull bge-m3'); this only checks
-# it is reachable so the run doesn't fail deep into a build.
-$code = 0
-try {
-    $code = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 `
-            -Uri 'http://localhost:11434/api/tags').StatusCode
-} catch { $code = 0 }
-if ($code -ne 200) {
-    Write-Error "Ollama not reachable at http://localhost:11434. Start it ('ollama serve') and ensure bge-m3 is pulled ('ollama pull bge-m3')."
+# Ollama liveness on the Windows host. If it is not up, try to START it for
+# the user ('ollama serve' in the background) and pull the bge-m3 embedder if
+# it is missing -- a multi-day run should not die on the doorstep because the
+# embedder server wasn't running yet. If it cannot be auto-started (Ollama not
+# on PATH, or the start fails) it falls back to prompting and retrying.
+function Test-Ollama {
+    param([string]$Url, [string]$Model)
+    try {
+        $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri "$Url/api/tags"
+        if ($r.StatusCode -eq 200) {
+            return @{ Up = $true; HasModel = ($r.Content -match [regex]::Escape($Model)) }
+        }
+    } catch {}
+    return @{ Up = $false; HasModel = $false }
+}
+function Initialize-Ollama {
+    param([string]$Url = 'http://localhost:11434', [string]$Model = 'bge-m3')
+    $ollama = Get-Command ollama -ErrorAction SilentlyContinue
+    while ($true) {
+        $s = Test-Ollama -Url $Url -Model $Model
+        if ($s.Up -and $s.HasModel) {
+            Write-Host "[main-study] Ollama is up and '$Model' is available." -ForegroundColor Green
+            return $true
+        }
+        # Start the server ourselves if it is installed and not up.
+        if (-not $s.Up -and $ollama) {
+            Write-Host "[main-study] Ollama not running; starting 'ollama serve' in the background..." -ForegroundColor Cyan
+            $env:OLLAMA_NUM_PARALLEL = '1'
+            $env:OLLAMA_MAX_LOADED_MODELS = '1'
+            Start-Process -FilePath $ollama.Source -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
+            for ($i = 0; $i -lt 30; $i++) {
+                Start-Sleep -Seconds 1
+                if ((Test-Ollama -Url $Url -Model $Model).Up) { break }
+            }
+            $s = Test-Ollama -Url $Url -Model $Model
+        }
+        # Pull the embedder if the server is up but the model is missing.
+        if ($s.Up -and -not $s.HasModel -and $ollama) {
+            Write-Host "[main-study] Pulling embedder '$Model' (one-time)..." -ForegroundColor Cyan
+            & $ollama.Source pull $Model
+            $s = Test-Ollama -Url $Url -Model $Model
+        }
+        if ($s.Up -and $s.HasModel) {
+            Write-Host "[main-study] Ollama is up and '$Model' is available." -ForegroundColor Green
+            return $true
+        }
+        # Could not auto-start/pull -> prompt the user and retry.
+        Write-Host ''
+        if (-not $s.Up) {
+            Write-Host "[main-study] Could not reach or auto-start Ollama at $Url." -ForegroundColor Yellow
+            Write-Host '  Start it in another terminal:  ollama serve'
+        }
+        else {
+            Write-Host "[main-study] Ollama is up but '$Model' is not available." -ForegroundColor Yellow
+            Write-Host "  Pull it in another terminal:   ollama pull $Model"
+        }
+        $ans = Read-Host 'Press Enter to retry once it is ready, or type q then Enter to abort'
+        if ($ans -eq 'q') { return $false }
+    }
+}
+if (-not (Initialize-Ollama)) {
+    Write-Error 'Ollama not ready; aborting the run.'
     exit 1
 }
 
