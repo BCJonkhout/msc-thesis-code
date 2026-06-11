@@ -33,6 +33,39 @@ if (-not (Test-Path $python)) {
     exit 1
 }
 
+# Config preflight: required API keys must be set BEFORE we spend hours
+# building. GEMINI_API_KEY is always required (primary answerer + summaries);
+# XAI_API_KEY only when the grok cross-vendor slice (-WithSecondary) is
+# requested. If a key is missing, offer to paste it in-session (hidden) so the
+# user doesn't have to abort and re-run.
+function Read-SecretToEnv {
+    param([string]$Prompt)
+    $sec = Read-Host -AsSecureString $Prompt
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+    try { return [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+    finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+}
+function Test-RunConfig {
+    param([bool]$WithSecondary)
+    if ([string]::IsNullOrWhiteSpace($env:GEMINI_API_KEY)) {
+        Write-Host '[main-study] GEMINI_API_KEY is not set (required: Gemini answerer + summaries).' -ForegroundColor Yellow
+        $v = Read-SecretToEnv -Prompt 'Paste your GEMINI_API_KEY (or just press Enter to abort)'
+        if ([string]::IsNullOrWhiteSpace($v)) { Write-Error 'GEMINI_API_KEY not provided; aborting.'; return $false }
+        $env:GEMINI_API_KEY = $v.Trim()
+    }
+    if ($WithSecondary -and [string]::IsNullOrWhiteSpace($env:XAI_API_KEY)) {
+        Write-Host '[main-study] -WithSecondary set but XAI_API_KEY is not set (the grok slice needs it).' -ForegroundColor Yellow
+        $v = Read-SecretToEnv -Prompt 'Paste your XAI_API_KEY (or just press Enter to abort)'
+        if ([string]::IsNullOrWhiteSpace($v)) { Write-Error 'XAI_API_KEY not provided; aborting.'; return $false }
+        $env:XAI_API_KEY = $v.Trim()
+    }
+    $msg = '[main-study] Config OK: GEMINI_API_KEY set'
+    if ($WithSecondary) { $msg += '; XAI_API_KEY set' }
+    Write-Host "$msg." -ForegroundColor Green
+    return $true
+}
+if (-not (Test-RunConfig -WithSecondary:$WithSecondary)) { exit 1 }
+
 # Ollama liveness on the Windows host. If it is not up, try to START it for
 # the user ('ollama serve' in the background) and pull the bge-m3 embedder if
 # it is missing -- a multi-day run should not die on the doorstep because the
