@@ -310,7 +310,9 @@ _RAPTOR_DEFAULTS = dict(
     tb_max_tokens=100,           # leaf chunk size; paper §3.1
     tb_num_layers=5,             # depth cap; paper §3.1
     tb_summarization_length=200, # summary target ≈ 200 tokens (pilot's lock)
-    tr_top_k=10,                 # retrieval k (collapsed-tree picks by token budget)
+    tr_top_k=20,                 # paper §4 "approximately top-20 nodes" (was 10, which
+                                 # capped RAPTOR's answer context below its own 2000-token
+                                 # budget -- a per-architecture under-feeding confound)
     tr_threshold=0.5,
     # Sarthi 2024 §4 collapsed-tree retrieval picks nodes greedily
     # by similarity until the token budget hits; the threshold mode
@@ -640,6 +642,7 @@ def run_raptor(
     retrieved_text, layer_info = ra.retrieve(
         query,
         collapse_tree=_RAPTOR_DEFAULTS["collapse_tree"],
+        top_k=_RAPTOR_DEFAULTS["tr_top_k"],
         max_tokens=_RAPTOR_DEFAULTS["retrieval_max_tokens"],
         return_layer_information=True,
     )
@@ -651,6 +654,7 @@ def run_raptor(
     predicted = ra.answer_question(
         query,
         collapse_tree=_RAPTOR_DEFAULTS["collapse_tree"],
+        top_k=_RAPTOR_DEFAULTS["tr_top_k"],
         max_tokens=_RAPTOR_DEFAULTS["retrieval_max_tokens"],
     )
 
