@@ -93,6 +93,7 @@ from dataclasses import dataclass, field
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
+from pilot import build_call_cache
 from pilot.architectures.base import ArchitectureResult, _render_prompt
 from pilot.encoders import OllamaEmbedder, SentenceBoundaryChunker
 from pilot.ledger import CostLedger, Stage, sha256_hex
@@ -608,6 +609,12 @@ def _extract_entities_per_chunk(
             if pass_idx == 0
             else _ENTITY_GLEAN_PROMPT.format(chunk=chunk)
         )
+        # Resume support: reuse this exact extraction if a prior (interrupted)
+        # build already paid for it, so a re-attempt finishes the remainder
+        # instead of re-spending the whole document.
+        cached = build_call_cache.get("graphrag-extract", answerer_model, "", prompt)
+        if cached is not None:
+            return _parse_extract_json(cached)
         with ledger.log_call(
             architecture="graphrag",
             stage=Stage.PREPROCESS,
@@ -629,6 +636,7 @@ def _extract_entities_per_chunk(
             rec.output_tokens = result.output_tokens
             rec.provider_request_id = result.provider_request_id
             rec.response_hash = sha256_hex(result.text or "")
+        build_call_cache.put("graphrag-extract", answerer_model, "", prompt, result.text or "")
         return _parse_extract_json(result.text or "")
 
     build_concurrency = max(1, int(os.environ.get("PILOT_BUILD_CONCURRENCY", "1")))
@@ -782,6 +790,9 @@ def _summarise_communities(
         jobs.append((community_idx, member_list, prompt))
 
     def _report_text(prompt: str) -> str:
+        cached = build_call_cache.get("graphrag-report", answerer_model, "", prompt)
+        if cached is not None:
+            return cached
         with ledger.log_call(
             architecture="graphrag",
             stage=Stage.PREPROCESS,
@@ -803,7 +814,9 @@ def _summarise_communities(
             rec.output_tokens = result.output_tokens
             rec.provider_request_id = result.provider_request_id
             rec.response_hash = sha256_hex(result.text or "")
-        return result.text or ""
+        text = result.text or ""
+        build_call_cache.put("graphrag-report", answerer_model, "", prompt, text)
+        return text
 
     build_concurrency = max(1, int(os.environ.get("PILOT_BUILD_CONCURRENCY", "1")))
     if build_concurrency > 1 and len(jobs) > 1:

@@ -49,6 +49,7 @@ from pathlib import Path
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
+from pilot import build_call_cache
 from pilot.architectures.base import ArchitectureResult, _render_prompt
 from pilot.encoders import OllamaEmbedder
 from pilot.ledger import CostLedger, Stage, sha256_hex
@@ -187,6 +188,12 @@ class _LedgerSummarizationModel(BaseSummarizationModel):
     def summarize(self, context, max_tokens: int | None = None):
         prompt = _RAPTOR_SUMMARY_PROMPT.format(context=context)
         cap = max_tokens if max_tokens is not None else self.max_tokens
+        # Resume support: reuse this exact summary if a prior (interrupted)
+        # tree build already paid for it (cap affects the output, so it is part
+        # of the key).
+        cached = build_call_cache.get("raptor-summary", self.model, str(cap), prompt)
+        if cached is not None:
+            return cached
         with self.ledger.log_call(
             architecture="raptor",
             stage=Stage.PREPROCESS,
@@ -208,7 +215,9 @@ class _LedgerSummarizationModel(BaseSummarizationModel):
             rec.output_tokens = result.output_tokens
             rec.provider_request_id = result.provider_request_id
             rec.response_hash = sha256_hex(result.text or "")
-        return result.text
+        text = result.text or ""
+        build_call_cache.put("raptor-summary", self.model, str(cap), prompt, text)
+        return text
 
 
 # ──────────────────────────────────────────────────────────────────────

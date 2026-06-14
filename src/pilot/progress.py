@@ -55,19 +55,37 @@ class RunProgress:
         self._google = 0
         self._build_active = False
         self._t0 = 0.0
+        self._build_t0 = 0.0
         self._last = 0.0
         self._interval = 0.5  # seconds between in-place repaints
         self._width = 0       # last line length, for clean overwrite
+        self._spin = 0        # ASCII spinner index (advances each repaint)
+        self._stop = None     # heartbeat stop signal
+        self._hb = None       # heartbeat thread
 
     # ── lifecycle ────────────────────────────────────────────────────
     def __enter__(self) -> "RunProgress":
         if self.enabled:
             self._t0 = time.monotonic()
             self._active = True
+            # Heartbeat: repaint on a timer so the line never looks frozen
+            # during a long no-LLM phase (e.g. GraphRAG graph build + Louvain
+            # community detection emit no calls to count). The spinner advances
+            # and the build-elapsed climbs, showing the run is alive.
+            self._stop = threading.Event()
+            self._hb = threading.Thread(target=self._heartbeat, daemon=True)
+            self._hb.start()
         return self
 
     def __exit__(self, *exc: Any) -> None:
         if self._active:
+            if self._stop is not None:
+                self._stop.set()
+            if self._hb is not None:
+                try:
+                    self._hb.join(timeout=2.0)
+                except Exception:
+                    pass
             self._render(force=True)
             try:
                 sys.stderr.write("\n")
@@ -75,6 +93,11 @@ class RunProgress:
             except Exception:
                 pass
             self._active = False
+
+    def _heartbeat(self) -> None:
+        # self._stop.wait returns False on timeout (keep going), True when set.
+        while self._stop is not None and not self._stop.wait(1.0):
+            self._render(force=True)
 
     def log(self, msg: str) -> None:
         """Emit a one-off message on its own line, above the status line."""
@@ -119,6 +142,7 @@ class RunProgress:
             self._embeds = 0
             self._google = 0
             self._build_active = True
+            self._build_t0 = time.monotonic()
         self._render(force=True)
 
     def end_build(self) -> None:
@@ -153,6 +177,8 @@ class RunProgress:
             if not force and (now - self._last) < self._interval:
                 return
             self._last = now
+            spin = "|/-\\"[self._spin % 4]
+            self._spin += 1
             total = self._total or 1
             done = self._done
             pct = 100.0 * done / total
@@ -170,11 +196,15 @@ class RunProgress:
                 rate_txt = "  --/min"
                 eta = "--"
             line = (
-                f"[progress] run {self._run_index + 1}/{self._num_runs} "
+                f"{spin} [progress] run {self._run_index + 1}/{self._num_runs} "
                 f"[{bar}] {pct:5.1f}%  {done}/{total}  {rate_txt}  eta {eta}"
             )
             if self._build_active:
-                line += f"  building {self._build_label} (emb {self._embeds} llm {self._google})"
+                bsec = int(max(0.0, now - self._build_t0))
+                line += (
+                    f"  building {self._build_label} "
+                    f"(emb {self._embeds} llm {self._google}, {_fmt_eta(bsec) if bsec else '0s'})"
+                )
             pad = max(0, self._width - len(line))
             self._width = len(line)
             out = "\r" + line + (" " * pad)

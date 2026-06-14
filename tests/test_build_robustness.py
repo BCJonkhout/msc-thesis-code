@@ -74,10 +74,14 @@ class _ChunkDeterministicAnswerer(AnswererProvider):
 
     def __init__(self, chunks: list[str]) -> None:
         self.chunks = chunks
+        self.calls = 0
+        self._clock = __import__("threading").Lock()
 
     def call(self, prompt: str, *, model: str, max_tokens=None,
              temperature: float = 0.0, top_p: float = 1.0,
              cache_control: CacheControl = CacheControl.DISABLED) -> ProviderResult:
+        with self._clock:
+            self.calls += 1
         idx = next((i for i, c in enumerate(self.chunks) if c in prompt), None)
         if idx is None:
             payload: dict = {"entities": [], "relationships": []}
@@ -155,3 +159,48 @@ def test_load_failed_builds_roundtrip_and_tolerates_torn_line(tmp_path):
 def test_load_failed_builds_missing_file(tmp_path):
     from pilot.cli.step_3_dry_run import _load_failed_builds
     assert _load_failed_builds(tmp_path) == set()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 4. Resumable build-call cache
+# ──────────────────────────────────────────────────────────────────────
+
+def test_build_call_cache_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("PILOT_BUILD_CALL_CACHE", "")          # enable
+    monkeypatch.setenv("PILOT_BUILD_CALL_CACHE_DIR", str(tmp_path / "cc"))
+    from pilot import build_call_cache as bcc
+    assert bcc.get("k", "m", "", "req") is None
+    bcc.put("k", "m", "", "req", "resp")
+    assert bcc.get("k", "m", "", "req") == "resp"
+    # Different request text / kind / model => independent entries.
+    assert bcc.get("k", "m", "", "other") is None
+    assert bcc.get("other", "m", "", "req") is None
+
+
+def test_build_call_cache_resumes_extraction_without_respending(tmp_path, monkeypatch):
+    """A second build over the same chunks reuses the cached calls — the whole
+    point: an interrupted big-novel build resumes instead of re-paying."""
+    monkeypatch.setenv("PILOT_BUILD_CALL_CACHE", "")          # enable
+    monkeypatch.setenv("PILOT_BUILD_CALL_CACHE_DIR", str(tmp_path / "cc"))
+    monkeypatch.setenv("PILOT_BUILD_CONCURRENCY", "1")
+    from pilot.architectures.graphrag import _extract_entities_per_chunk
+    from pilot.ledger import CostLedger
+
+    chunks = [f"CHUNKMARKER{i}xyz" for i in range(4)]
+    ans = _ChunkDeterministicAnswerer(chunks)
+
+    led1 = CostLedger(run_id="cc1", root=tmp_path / "r1")
+    e1, _ = _extract_entities_per_chunk(
+        chunks, answerer=ans, answerer_model="m", ledger=led1, run_index=0)
+    first = ans.calls
+    assert first > 0
+
+    # Re-run (fresh ledger, same cache dir): every call must be served from the
+    # cache, so the provider is not hit again.
+    led2 = CostLedger(run_id="cc2", root=tmp_path / "r2")
+    e2, _ = _extract_entities_per_chunk(
+        chunks, answerer=ans, answerer_model="m", ledger=led2, run_index=0)
+    assert ans.calls == first, "second build must make zero new provider calls"
+
+    norm = lambda ents: sorted((e.name, e.type, e.description, tuple(e.text_unit_ids)) for e in ents)
+    assert norm(e1) == norm(e2), "cached build must be identical to the original"
