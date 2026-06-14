@@ -1,170 +1,131 @@
-"""Live build / evaluation progress display (clean rich TUI).
+"""Live build / evaluation progress — one self-overwriting ASCII status line.
 
-One live region with two lines:
+Deliberately plain: a single line rewritten in place with a carriage return,
+using only ASCII, no rich / no ANSI / no Unicode. The earlier rich-based live
+region either silently failed to appear (stdout not reported as a TTY under
+wrapper scripts / integrated terminals) or crashed encoding box-drawing glyphs
+on a legacy cp1252 Windows console. A plain ``\\r`` line — the same mechanism
+pip and curl use — renders reliably in any of those contexts and on any code
+page.
 
-  * **Evaluation** — a determinate bar over all cells in this run_index
-    (``completed / total``) with elapsed + ETA. This is the "main
-    evaluation section" progress.
-  * **Build** — the activity of the document build currently in flight,
-    showing BOTH the Ollama embeddings and the Google summary/extraction
-    calls it makes. The counters are driven from the single ``CostLedger``
-    row hook every embed + LLM call already passes through, so no progress
-    plumbing has to be threaded into the vendored RAPTOR / GraphRAG code.
-
-The display is a no-op when ``enabled`` is false (stdout is not a TTY, or
-``--no-tui`` was passed), so redirected / cron runs fall back to plain
-logging without emitting terminal control codes.
+The line shows overall evaluation progress for this run_index (cells done /
+total, an ASCII bar, throughput, ETA) and, while a document build is in flight,
+its embedding + LLM call counts — so a long build never looks frozen.
 """
 from __future__ import annotations
 
+import sys
 import threading
+import time
 from typing import Any
 
 
 def tui_supported() -> bool:
-    """True when a live TUI can render to this stdout (an interactive TTY)."""
-    import sys
-    try:
-        return bool(sys.stdout) and sys.stdout.isatty()
-    except Exception:
-        return False
+    """The plain status line works on any stream, so it is always available."""
+    return True
+
+
+def _fmt_eta(seconds: float) -> str:
+    if not (seconds > 0) or seconds != seconds:  # <=0 or NaN
+        return "--"
+    s = int(seconds)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
 
 
 class RunProgress:
-    """Thread-safe live progress for one ``run_dry_run`` invocation."""
+    """Thread-safe single-line progress for one ``run_dry_run`` invocation."""
 
     def __init__(self, *, enabled: bool) -> None:
         self.enabled = enabled
         self._lock = threading.Lock()
-        self._live = None
-        self._eval = None
-        self._build = None
-        self._eval_task = None
-        self._build_task = None
+        self._active = False
+        self._total = 0
+        self._done = 0
+        self._start_done = 0
+        self._run_index = 0
+        self._num_runs = 1
+        self._build_label = ""
         self._embeds = 0
         self._google = 0
         self._build_active = False
-        self._build_label = ""
+        self._t0 = 0.0
+        self._last = 0.0
+        self._interval = 0.5  # seconds between in-place repaints
+        self._width = 0       # last line length, for clean overwrite
 
     # ── lifecycle ────────────────────────────────────────────────────
     def __enter__(self) -> "RunProgress":
-        if not self.enabled:
-            return self
-        try:
-            import sys
-            # Windows consoles often default to a legacy code page (cp1252)
-            # that cannot encode the bar/spinner glyphs; the first redraw then
-            # raises UnicodeEncodeError and kills the run. Force UTF-8 and
-            # NEVER hard-fail on a stray glyph (errors="replace").
-            for _stream in (sys.stdout, sys.stderr):
-                try:
-                    _stream.reconfigure(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
-            from rich.console import Console, Group
-            from rich.live import Live
-            from rich.progress import (
-                BarColumn, MofNCompleteColumn, Progress, SpinnerColumn,
-                TaskProgressColumn, TextColumn, TimeElapsedColumn,
-                TimeRemainingColumn,
-            )
-            # force_terminal=True so the live region renders even when stdout
-            # does not report as a TTY (integrated terminals, wrapper scripts) —
-            # the usual reason the bar silently fails to appear.
-            # legacy_windows=False keeps rich on the modern ANSI/VT renderer
-            # (Win10+/Win11 support it) instead of the legacy console-API path
-            # that encodes through the active code page and crashes on glyphs.
-            console = Console(force_terminal=True, legacy_windows=False)
-            self._eval = Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]{task.description}"),
-                BarColumn(),
-                MofNCompleteColumn(),
-                TaskProgressColumn(),
-                TextColumn("elapsed"),
-                TimeElapsedColumn(),
-                TextColumn("eta"),
-                TimeRemainingColumn(),
-                console=console,
-            )
-            self._build = Progress(
-                SpinnerColumn(),
-                TextColumn("{task.description}"),
-                console=console,
-            )
-            self._live = Live(
-                Group(self._eval, self._build),
-                console=console,
-                refresh_per_second=6,
-                transient=False,
-                # Capture stray stdout/stderr (per-document cache logs, provider
-                # warnings) and render them above the live region instead of
-                # letting them tear the bars.
-                redirect_stdout=True,
-                redirect_stderr=True,
-            )
-            self._live.__enter__()
-        except Exception as exc:
-            # Never let a display problem take down the run — fall back to
-            # plain logging and say why.
-            import sys
-            self.enabled = False
-            self._live = None
-            print(f"[progress] live display unavailable ({exc!r}); using plain logs",
-                  file=sys.stderr)
+        if self.enabled:
+            self._t0 = time.monotonic()
+            self._active = True
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        if self._live is not None:
+        if self._active:
+            self._render(force=True)
             try:
-                self._live.__exit__(*exc)
+                sys.stdout.write("\n")
+                sys.stdout.flush()
             except Exception:
                 pass
-            self._live = None
+            self._active = False
 
     def log(self, msg: str) -> None:
-        """Print a line above the live bars (or fall back to stderr)."""
-        if self._eval is not None:
-            try:
-                self._eval.console.log(msg)
-                return
-            except Exception:
-                pass
-        import sys
-        print(msg, file=sys.stderr)
+        """Emit a one-off message on its own line, above the status line."""
+        if not self._active:
+            print(msg, file=sys.stderr)
+            return
+        try:
+            sys.stdout.write("\r" + (" " * self._width) + "\r")
+            print(msg)
+            sys.stdout.flush()
+            self._width = 0
+        except Exception:
+            print(msg)
+        self._render(force=True)
 
     # ── evaluation bar ───────────────────────────────────────────────
     def start_eval(self, *, total: int, completed: int,
                    run_index: int, num_runs: int) -> None:
-        if not self.enabled or self._eval is None:
+        if not self.enabled:
             return
-        desc = f"Evaluation (run {run_index + 1}/{num_runs})"
-        self._eval_task = self._eval.add_task(desc, total=total, completed=completed)
-        self._build_task = self._build.add_task("[dim]waiting…[/dim]", total=None)
+        with self._lock:
+            self._total = total
+            self._done = completed
+            self._start_done = completed
+            self._run_index = run_index
+            self._num_runs = num_runs
+        self._render(force=True)
 
     def advance_eval(self, n: int = 1) -> None:
-        if not self.enabled or self._eval is None or self._eval_task is None:
+        if not self.enabled:
             return
-        self._eval.advance(self._eval_task, n)
+        with self._lock:
+            self._done += n
+        self._render(force=True)
 
     # ── build line ───────────────────────────────────────────────────
     def start_build(self, label: str) -> None:
         if not self.enabled:
             return
         with self._lock:
+            self._build_label = label
             self._embeds = 0
             self._google = 0
             self._build_active = True
-            self._build_label = label
-        self._render_build()
+        self._render(force=True)
 
     def end_build(self) -> None:
         if not self.enabled:
             return
         with self._lock:
             self._build_active = False
-        if self._build is not None and self._build_task is not None:
-            self._build.update(self._build_task, description="[dim]waiting…[/dim]")
 
     def on_row(self, rec: Any) -> None:
         """CostLedger hook: tally the in-flight build's embed vs LLM calls."""
@@ -181,19 +142,44 @@ class RunProgress:
                 self._google += 1
             else:
                 return
-        self._render_build()
+        self._render()
 
-    def _render_build(self) -> None:
-        if self._build is None or self._build_task is None:
+    # ── rendering ────────────────────────────────────────────────────
+    def _render(self, force: bool = False) -> None:
+        if not self._active:
             return
+        now = time.monotonic()
         with self._lock:
-            if not self._build_active:
+            if not force and (now - self._last) < self._interval:
                 return
-            label, embeds, google = self._build_label, self._embeds, self._google
-        self._build.update(
-            self._build_task,
-            description=(
-                f"building [bold]{label}[/bold] · "
-                f"embeds [cyan]{embeds}[/cyan] · google [magenta]{google}[/magenta]"
-            ),
-        )
+            self._last = now
+            total = self._total or 1
+            done = self._done
+            pct = 100.0 * done / total
+            nfill = max(0, min(24, int(round(24 * done / total))))
+            bar = "#" * nfill + "." * (24 - nfill)
+            elapsed = max(1e-6, now - self._t0)
+            sess = done - self._start_done
+            # Hold off on rate/ETA until there is enough signal, so the first
+            # cell after a resume doesn't print an absurd instantaneous rate.
+            if sess >= 3 and elapsed >= 5.0:
+                per_sec = sess / elapsed
+                rate_txt = f"{per_sec * 60.0:4.0f}/min"
+                eta = _fmt_eta((total - done) / per_sec)
+            else:
+                rate_txt = "  --/min"
+                eta = "--"
+            line = (
+                f"[progress] run {self._run_index + 1}/{self._num_runs} "
+                f"[{bar}] {pct:5.1f}%  {done}/{total}  {rate_txt}  eta {eta}"
+            )
+            if self._build_active:
+                line += f"  building {self._build_label} (emb {self._embeds} llm {self._google})"
+            pad = max(0, self._width - len(line))
+            self._width = len(line)
+            out = "\r" + line + (" " * pad)
+        try:
+            sys.stdout.write(out)
+            sys.stdout.flush()
+        except Exception:
+            pass

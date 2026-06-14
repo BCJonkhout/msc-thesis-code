@@ -942,7 +942,7 @@ def run_dry_run(
                             )
                         else:
                             replayed = 0
-                        print(
+                        verbose and print(
                             f"[step3-dry-run] HIT  {tag} preprocessing cached "
                             f"(disk, source_run={entry.build_meta.get('build_run_id')}, "
                             f"replayed_rows={replayed})",
@@ -960,7 +960,7 @@ def run_dry_run(
                             f"or drop --cache-required"
                         )
                     else:
-                        print(
+                        verbose and print(
                             f"[step3-dry-run] MISS {tag} preprocessing cache "
                             f"(disk, key={disk_key_hash}) — building",
                             file=sys.stderr,
@@ -1087,7 +1087,7 @@ def run_dry_run(
                             build_meta=build_meta,
                             cache_root=disk_cache_root,
                         )
-                        print(
+                        verbose and print(
                             f"[step3-dry-run] SAVE {tag} preprocessing cache "
                             f"(disk, key={disk_key_hash}, rows={len(build_rows)})",
                             file=sys.stderr,
@@ -1107,10 +1107,8 @@ def run_dry_run(
                         # this should not fire, but catching it keeps
                         # any future drift into an unpicklable field
                         # from killing a multi-question run silently.
-                        print(
-                            f"[step3-dry-run] WARN disk-cache save failed for {tag}: {exc!r}",
-                            file=sys.stderr,
-                        )
+                        warn_msg = f"[step3-dry-run] WARN disk-cache save failed for {tag}: {exc!r}"
+                        progress.log(warn_msg) if tui_enabled else print(warn_msg, file=sys.stderr)
 
                 scores = _score_item(item, result)
                 row = {
@@ -1199,7 +1197,7 @@ def run_dry_run(
                 for k in evicted:
                     del preprocessing_cache[k]
                 if evicted:
-                    print(
+                    verbose and print(
                         f"[step3-dry-run] EVICT preprocessing cache for paper_id={paper_id} "
                         f"({len(evicted)} arch entries)",
                         file=sys.stderr,
