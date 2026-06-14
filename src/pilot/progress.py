@@ -70,8 +70,8 @@ class RunProgress:
         if self._active:
             self._render(force=True)
             try:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                sys.stderr.write("\n")
+                sys.stderr.flush()
             except Exception:
                 pass
             self._active = False
@@ -82,12 +82,12 @@ class RunProgress:
             print(msg, file=sys.stderr)
             return
         try:
-            sys.stdout.write("\r" + (" " * self._width) + "\r")
-            print(msg)
-            sys.stdout.flush()
+            sys.stderr.write("\r" + (" " * self._width) + "\r")
+            print(msg, file=sys.stderr)
+            sys.stderr.flush()
             self._width = 0
         except Exception:
-            print(msg)
+            print(msg, file=sys.stderr)
         self._render(force=True)
 
     # ── evaluation bar ───────────────────────────────────────────────
@@ -179,7 +179,7 @@ class RunProgress:
             self._width = len(line)
             out = "\r" + line + (" " * pad)
         try:
-            sys.stdout.write(out)
-            sys.stdout.flush()
+            sys.stderr.write(out)
+            sys.stderr.flush()
         except Exception:
             pass
