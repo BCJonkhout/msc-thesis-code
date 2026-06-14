@@ -86,6 +86,7 @@ import os
 import random
 import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 # Pin numba/OpenMP threads before networkx and friends import them.
@@ -582,36 +583,75 @@ def _extract_entities_per_chunk(
     entities: dict[str, _Entity] = {}
     relationships: list[_Relationship] = []
 
-    for chunk_idx, chunk in enumerate(chunks):
-        for pass_idx in range(max_gleanings + 1):
-            if pass_idx == 0:
-                prompt = _ENTITY_EXTRACT_PROMPT.format(chunk=chunk)
-            else:
-                prompt = _ENTITY_GLEAN_PROMPT.format(chunk=chunk)
-            with ledger.log_call(
-                architecture="graphrag",
-                stage=Stage.PREPROCESS,
-                model=answerer_model,
-                prompt=prompt,
-                run_index=run_index,
-                temperature=0.0,
-                max_tokens=max_tokens,
-            ) as rec:
-                result = answerer.call(
-                    prompt,
-                    model=answerer_model,
-                    max_tokens=max_tokens,
-                    temperature=0.0,
-                    cache_control=CacheControl.EPHEMERAL_5MIN,
-                )
-                rec.uncached_input_tokens = result.uncached_input_tokens
-                rec.cached_input_tokens = result.cached_input_tokens
-                rec.output_tokens = result.output_tokens
-                rec.provider_request_id = result.provider_request_id
-                rec.response_hash = sha256_hex(result.text or "")
+    # Each (chunk, pass) extraction call depends only on its chunk text (the
+    # gleaning prompt re-reads the chunk; it does not chain on the prior
+    # pass), so the calls are independent and can run concurrently. The cost
+    # bottleneck of a GraphRAG build is exactly these per-chunk provider calls
+    # (one initial + max_gleanings per chunk), so overlapping them is the main
+    # build speed-up on long documents.
+    #
+    # Determinism is preserved by separating the work into (1) a concurrent
+    # FETCH of every (chunk, pass) extraction and (2) a SEQUENTIAL merge in
+    # fixed (chunk_idx, pass_idx) order — identical to the original loop's
+    # merge order regardless of which calls finish first. Concurrency is
+    # bounded by PILOT_BUILD_CONCURRENCY (default 1 = sequential).
+    tasks = [
+        (chunk_idx, pass_idx)
+        for chunk_idx in range(len(chunks))
+        for pass_idx in range(max_gleanings + 1)
+    ]
 
-            parsed = _parse_extract_json(result.text or "")
-            # Stop gleaning early if a pass returns nothing
+    def _fetch(chunk_idx: int, pass_idx: int) -> dict:
+        chunk = chunks[chunk_idx]
+        prompt = (
+            _ENTITY_EXTRACT_PROMPT.format(chunk=chunk)
+            if pass_idx == 0
+            else _ENTITY_GLEAN_PROMPT.format(chunk=chunk)
+        )
+        with ledger.log_call(
+            architecture="graphrag",
+            stage=Stage.PREPROCESS,
+            model=answerer_model,
+            prompt=prompt,
+            run_index=run_index,
+            temperature=0.0,
+            max_tokens=max_tokens,
+        ) as rec:
+            result = answerer.call(
+                prompt,
+                model=answerer_model,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                cache_control=CacheControl.EPHEMERAL_5MIN,
+            )
+            rec.uncached_input_tokens = result.uncached_input_tokens
+            rec.cached_input_tokens = result.cached_input_tokens
+            rec.output_tokens = result.output_tokens
+            rec.provider_request_id = result.provider_request_id
+            rec.response_hash = sha256_hex(result.text or "")
+        return _parse_extract_json(result.text or "")
+
+    build_concurrency = max(1, int(os.environ.get("PILOT_BUILD_CONCURRENCY", "1")))
+    parsed_by_task: dict[tuple[int, int], dict] = {}
+    if build_concurrency > 1:
+        with ThreadPoolExecutor(max_workers=build_concurrency) as executor:
+            futures = {
+                executor.submit(_fetch, ci, pi): (ci, pi) for ci, pi in tasks
+            }
+            for fut in futures:
+                ci, pi = futures[fut]
+                parsed_by_task[(ci, pi)] = fut.result()
+    else:
+        for ci, pi in tasks:
+            parsed_by_task[(ci, pi)] = _fetch(ci, pi)
+
+    # Deterministic merge: fixed (chunk_idx, pass_idx) order, identical to the
+    # reference sequential extraction. The early-stop mirrors the original —
+    # an empty gleaning pass is not merged (and, for max_gleanings>1, ends
+    # that chunk's passes).
+    for chunk_idx in range(len(chunks)):
+        for pass_idx in range(max_gleanings + 1):
+            parsed = parsed_by_task[(chunk_idx, pass_idx)]
             if pass_idx > 0 and not parsed.get("entities") and not parsed.get("relationships"):
                 break
             _merge_extraction(entities, relationships, parsed, chunk_idx=chunk_idx)
@@ -708,8 +748,15 @@ def _summarise_communities(
     run_index: int,
     max_tokens: int = 800,
 ) -> list[_CommunityReport]:
-    """Per-community LLM call producing a structured ~500-700 token report."""
-    reports: list[_CommunityReport] = []
+    """Per-community LLM call producing a structured ~500-700 token report.
+
+    Each community's report is an independent, deterministic (T=0) LLM call,
+    so the calls run concurrently (bounded by PILOT_BUILD_CONCURRENCY, default
+    1 = sequential) while the reports are assembled in fixed community order,
+    keeping the build byte-identical to the sequential reference.
+    """
+    # Build the per-community prompts in deterministic order first.
+    jobs: list[tuple[int, list[str], str]] = []
     for community_idx, members in enumerate(communities):
         if not members:
             continue
@@ -728,11 +775,13 @@ def _summarise_communities(
                     f"- **{u} ↔ {v}** (weight {data.get('weight', 1)}): "
                     f"{data.get('description', '')}"
                 )
-
         prompt = _COMMUNITY_REPORT_PROMPT.format(
             entities="\n".join(ent_lines),
             relationships="\n".join(rel_lines) or "_(no within-community relationships)_",
         )
+        jobs.append((community_idx, member_list, prompt))
+
+    def _report_text(prompt: str) -> str:
         with ledger.log_call(
             architecture="graphrag",
             stage=Stage.PREPROCESS,
@@ -754,11 +803,21 @@ def _summarise_communities(
             rec.output_tokens = result.output_tokens
             rec.provider_request_id = result.provider_request_id
             rec.response_hash = sha256_hex(result.text or "")
+        return result.text or ""
 
+    build_concurrency = max(1, int(os.environ.get("PILOT_BUILD_CONCURRENCY", "1")))
+    if build_concurrency > 1 and len(jobs) > 1:
+        with ThreadPoolExecutor(max_workers=build_concurrency) as executor:
+            texts = list(executor.map(lambda j: _report_text(j[2]), jobs))
+    else:
+        texts = [_report_text(prompt) for _, _, prompt in jobs]
+
+    reports: list[_CommunityReport] = []
+    for (community_idx, member_list, _), text in zip(jobs, texts):
         reports.append(_CommunityReport(
             community_id=community_idx,
             member_names=member_list,
-            text=result.text or "",
+            text=text,
             rank=len(member_list),
         ))
     return reports

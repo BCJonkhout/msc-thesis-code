@@ -1,5 +1,6 @@
 import logging
 import random
+import sys
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
@@ -7,6 +8,19 @@ import numpy as np
 import tiktoken
 import umap
 from sklearn.mixture import GaussianMixture
+
+# RAPTOR_Clustering.perform_clustering recurses to break up any cluster whose
+# concatenated text exceeds max_length_in_cluster. On a large, low-diversity
+# leaf set (e.g. a long NovelQA novel) the GMM can keep returning a single
+# cluster equal to its input, so the original code recursed on the same set
+# forever and overflowed the stack ("RecursionError: maximum recursion depth
+# exceeded", observed on novels B12/B24/B38/B42). The convergence guard in
+# perform_clustering (recurse only on a strictly-smaller subset) makes the
+# recursion provably terminating; this depth ceiling is a cheap backstop, set
+# well above the ~log2(tokens/max_len) levels a legitimate split needs.
+_MAX_RECLUSTER_DEPTH = 24
+# Belt-and-suspenders against any other deep recursion in the build/pickle path.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 10_000))
 
 # Initialize logging
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
@@ -152,6 +166,7 @@ class RAPTOR_Clustering(ClusteringAlgorithm):
         reduction_dimension: int = 10,
         threshold: float = 0.1,
         verbose: bool = False,
+        _depth: int = 0,
     ) -> List[List[Node]]:
         # Get the embeddings from the nodes
         embeddings = np.array([node.embeddings[embedding_model_name] for node in nodes])
@@ -163,6 +178,7 @@ class RAPTOR_Clustering(ClusteringAlgorithm):
 
         # Initialize an empty list to store the clusters of nodes
         node_clusters = []
+        n_input = len(nodes)
 
         # Iterate over each unique label in the clusters
         for label in np.unique(np.concatenate(clusters)):
@@ -182,15 +198,29 @@ class RAPTOR_Clustering(ClusteringAlgorithm):
                 [len(tokenizer.encode(node.text)) for node in cluster_nodes]
             )
 
-            # If the total length exceeds the maximum allowed length, recluster this cluster
-            if total_length > max_length_in_cluster:
+            # If the total length exceeds the maximum allowed length, recluster
+            # this cluster -- but ONLY if doing so can make progress. Recurse
+            # solely on a strictly-smaller subset (this level actually split
+            # the input) and below the depth ceiling; otherwise the recursion
+            # on a degenerate, non-splitting set never terminates and overflows
+            # the stack. When we cannot split further, accept the oversized
+            # cluster as-is: the summariser just receives a longer context,
+            # which is bounded by the document and far cheaper than a crash.
+            can_make_progress = (
+                len(cluster_nodes) < n_input and _depth < _MAX_RECLUSTER_DEPTH
+            )
+            if total_length > max_length_in_cluster and can_make_progress:
                 if verbose:
                     logging.info(
-                        f"reclustering cluster with {len(cluster_nodes)} nodes"
+                        f"reclustering cluster with {len(cluster_nodes)} nodes "
+                        f"(depth {_depth})"
                     )
                 node_clusters.extend(
                     RAPTOR_Clustering.perform_clustering(
-                        cluster_nodes, embedding_model_name, max_length_in_cluster
+                        cluster_nodes,
+                        embedding_model_name,
+                        max_length_in_cluster,
+                        _depth=_depth + 1,
                     )
                 )
             else:

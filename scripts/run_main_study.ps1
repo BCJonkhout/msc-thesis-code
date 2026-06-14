@@ -17,7 +17,16 @@
 param(
     [ValidateSet('slice', 'full')]
     [string]$Mode = 'slice',
-    [switch]$WithSecondary
+    [switch]$WithSecondary,
+    # Concurrent provider (Gemini) build calls — RAPTOR summaries + GraphRAG
+    # entity-extraction / community-report calls overlap up to this many at a
+    # time. The dominant build cost on long documents; the provider's own
+    # backoff absorbs 429s. Set 1 for the strictly-sequential reference build.
+    [int]$BuildConcurrency = 6,
+    # Concurrent embeddings served by Ollama (OLLAMA_NUM_PARALLEL). Only takes
+    # effect for an Ollama server THIS script starts; restart a pre-existing
+    # server to pick it up. Kept moderate to avoid GPU saturation on the 4070.
+    [int]$EmbedConcurrency = 3
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -47,21 +56,28 @@ function Read-SecretToEnv {
 }
 function Test-RunConfig {
     param([bool]$WithSecondary)
-    if ([string]::IsNullOrWhiteSpace($env:GEMINI_API_KEY)) {
-        Write-Host '[main-study] GEMINI_API_KEY is not set (required: Gemini answerer + summaries).' -ForegroundColor Yellow
-        $v = Read-SecretToEnv -Prompt 'Paste your GEMINI_API_KEY (or just press Enter to abort)'
-        if ([string]::IsNullOrWhiteSpace($v)) { Write-Error 'GEMINI_API_KEY not provided; aborting.'; return $false }
+    # Keys live in code/.env (loaded by pilot.env.load_env at runtime), not
+    # necessarily in this shell -- and the Gemini provider accepts GOOGLE_API_KEY
+    # OR GEMINI_API_KEY. Resolve them the SAME way (load .env, check both) so a
+    # key present in .env does not trigger a false "missing key" prompt.
+    & $python -c "import os,sys; from dotenv import load_dotenv; load_dotenv('.env', override=True); sys.exit(0 if (os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')) else 1)" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '[main-study] No Gemini key found in code/.env or the environment (GOOGLE_API_KEY / GEMINI_API_KEY).' -ForegroundColor Yellow
+        Write-Host '  Add GEMINI_API_KEY=... to code/.env, or set $env:GEMINI_API_KEY in this shell.'
+        $v = Read-SecretToEnv -Prompt 'Or paste your GEMINI_API_KEY now (press Enter to abort)'
+        if ([string]::IsNullOrWhiteSpace($v)) { Write-Error 'No Gemini key; aborting.'; return $false }
         $env:GEMINI_API_KEY = $v.Trim()
     }
-    if ($WithSecondary -and [string]::IsNullOrWhiteSpace($env:XAI_API_KEY)) {
-        Write-Host '[main-study] -WithSecondary set but XAI_API_KEY is not set (the grok slice needs it).' -ForegroundColor Yellow
-        $v = Read-SecretToEnv -Prompt 'Paste your XAI_API_KEY (or just press Enter to abort)'
-        if ([string]::IsNullOrWhiteSpace($v)) { Write-Error 'XAI_API_KEY not provided; aborting.'; return $false }
-        $env:XAI_API_KEY = $v.Trim()
+    if ($WithSecondary) {
+        & $python -c "import os,sys; from dotenv import load_dotenv; load_dotenv('.env', override=True); sys.exit(0 if os.environ.get('XAI_API_KEY') else 1)" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host '[main-study] -WithSecondary set but no XAI_API_KEY in code/.env or the environment.' -ForegroundColor Yellow
+            $v = Read-SecretToEnv -Prompt 'Paste your XAI_API_KEY (press Enter to abort)'
+            if ([string]::IsNullOrWhiteSpace($v)) { Write-Error 'No XAI key; aborting.'; return $false }
+            $env:XAI_API_KEY = $v.Trim()
+        }
     }
-    $msg = '[main-study] Config OK: GEMINI_API_KEY set'
-    if ($WithSecondary) { $msg += '; XAI_API_KEY set' }
-    Write-Host "$msg." -ForegroundColor Green
+    Write-Host '[main-study] Config OK (keys resolved via code/.env / environment).' -ForegroundColor Green
     return $true
 }
 if (-not (Test-RunConfig -WithSecondary:$WithSecondary)) { exit 1 }
@@ -92,8 +108,8 @@ function Initialize-Ollama {
         }
         # Start the server ourselves if it is installed and not up.
         if (-not $s.Up -and $ollama) {
-            Write-Host "[main-study] Ollama not running; starting 'ollama serve' in the background..." -ForegroundColor Cyan
-            $env:OLLAMA_NUM_PARALLEL = '1'
+            Write-Host "[main-study] Ollama not running; starting 'ollama serve' (OLLAMA_NUM_PARALLEL=$EmbedConcurrency)..." -ForegroundColor Cyan
+            $env:OLLAMA_NUM_PARALLEL = "$EmbedConcurrency"
             $env:OLLAMA_MAX_LOADED_MODELS = '1'
             Start-Process -FilePath $ollama.Source -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
             for ($i = 0; $i -lt 30; $i++) {
@@ -134,8 +150,14 @@ if (-not (Initialize-Ollama)) {
 $env:PYTHONUNBUFFERED = '1'
 $env:OMP_NUM_THREADS = '1'
 $env:NUMBA_NUM_THREADS = '1'
-$env:OLLAMA_NUM_PARALLEL = '1'
+$env:OLLAMA_NUM_PARALLEL = "$EmbedConcurrency"
 $env:OLLAMA_EMBED_CACHE_DIR = 'outputs/embed_cache'
+# Overlap the (slow, provider-bound) RAPTOR summary + GraphRAG extraction /
+# community-report calls during a build. Builds stay deterministic (results
+# are assembled in fixed order); only the round-trips overlap.
+$env:PILOT_BUILD_CONCURRENCY = "$BuildConcurrency"
+Write-Host "[main-study] build concurrency: gemini=$BuildConcurrency, embed(OLLAMA_NUM_PARALLEL)=$EmbedConcurrency" -ForegroundColor Green
+Write-Host '[main-study] NOTE: embed concurrency only applies to an Ollama server this script starts; restart a pre-existing `ollama serve` to pick it up.' -ForegroundColor DarkGray
 
 $common = @(
     '--split', 'full', '--datasets', 'qasper', 'novelqa',
@@ -175,6 +197,13 @@ function Invoke-RunWithResume {
         Write-Host "[main-study] $Label attempt $attempt/$MaxAttempts (predictions so far: $before)"
         & $python $RunArgs
         if ($LASTEXITCODE -eq 0) { return $true }
+        if ($LASTEXITCODE -eq 3) {
+            # FATAL_EXIT_CODE: the run aborted on a long failure streak (broken
+            # infra/key/quota). Resuming would hit the same wall and spend more
+            # budget — stop and surface it instead.
+            Write-Host "[main-study] $Label ABORTED (fatal, exit 3) -- not resuming. Fix the issue reported above, then re-run." -ForegroundColor Red
+            return $false
+        }
         $after = Get-PredRowCount
         Write-Warning "[main-study] $Label exited $LASTEXITCODE (native crash / interruption); predictions $before -> $after. Resuming in place."
         if ($after -le $before) {

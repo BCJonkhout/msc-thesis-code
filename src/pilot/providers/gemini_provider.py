@@ -55,6 +55,16 @@ _RETRY_ATTEMPTS = 5
 _RETRY_BASE_S = 1.0
 _RETRY_MAX_S = 32.0
 
+# Per-request timeout (milliseconds). Without it the underlying httpx client
+# has no read timeout, so a single stuck/half-open connection blocks the call
+# forever — and under build concurrency that one hung call freezes the whole
+# build (the executor waits on it indefinitely). With a timeout, a stuck call
+# raises httpx.ReadTimeout/ConnectTimeout, which `_retryable` already treats
+# as retryable → exponential-backoff retry instead of an infinite hang.
+# Generous enough for the largest flat-over-novel answer call (~hundreds of
+# thousands of context tokens) while still bounding a dead connection.
+_REQUEST_TIMEOUT_MS = 180_000
+
 
 class GeminiProvider(AnswererProvider):
     name = "gemini"
@@ -75,8 +85,14 @@ class GeminiProvider(AnswererProvider):
     def _get_client(self):
         if self._client is None:
             from google import genai
+            from google.genai import types
 
-            self._client = genai.Client(api_key=self._api_key)
+            # http_options.timeout bounds each request so a stuck connection
+            # cannot block a build forever (see _REQUEST_TIMEOUT_MS).
+            self._client = genai.Client(
+                api_key=self._api_key,
+                http_options=types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
+            )
         return self._client
 
     @staticmethod

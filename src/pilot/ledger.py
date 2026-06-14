@@ -98,6 +98,11 @@ class CostLedger:
         # multiple threads, and without this their writes can interleave and
         # concatenate two JSON objects onto one line.
         self._write_lock = threading.Lock()
+        # Optional progress callback invoked once per written row (after the
+        # row is durably on disk). Used to drive the live build/eval progress
+        # display from the single point every embed + LLM call passes through.
+        # Set by the caller; left None for tests and non-interactive runs.
+        self.progress_hook = None
 
     @contextmanager
     def log_call(
@@ -169,6 +174,15 @@ class CostLedger:
                 import os as _os
                 _os.fsync(f.fileno())
             except (OSError, AttributeError):
+                pass
+        # Notify the progress display AFTER the row is durable and the write
+        # lock is released. Guarded so a TUI error can never break the run or
+        # drop a cost row.
+        hook = self.progress_hook
+        if hook is not None:
+            try:
+                hook(rec)
+            except Exception:
                 pass
 
     def read(self) -> list[CallRecord]:

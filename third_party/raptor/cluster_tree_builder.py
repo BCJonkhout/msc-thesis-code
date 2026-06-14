@@ -1,4 +1,5 @@
 import logging
+import os
 import pickle
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -111,8 +112,17 @@ class ClusterTreeBuilder(TreeBuilder):
             summarization_length = self.summarization_length
             logging.info(f"Summarization Length: {summarization_length}")
 
-            if use_multithreading:
-                with ThreadPoolExecutor() as executor:
+            # Summarisation is the slow, provider-bound step of the build.
+            # The clusters in a layer are independent and each parent node's
+            # index is fixed by submission order, so summarising them
+            # concurrently produces the SAME tree as the sequential path (the
+            # summary text is deterministic at T=0) -- it only overlaps the
+            # LLM round-trips. Concurrency is bounded by PILOT_BUILD_CONCURRENCY
+            # (default 1 = sequential, byte-identical to the reference build)
+            # so the build never fans out an unbounded burst of provider calls.
+            build_concurrency = max(1, int(os.environ.get("PILOT_BUILD_CONCURRENCY", "1")))
+            if build_concurrency > 1 or use_multithreading:
+                with ThreadPoolExecutor(max_workers=build_concurrency) as executor:
                     for cluster in clusters:
                         executor.submit(
                             process_cluster,

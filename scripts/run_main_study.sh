@@ -39,6 +39,12 @@ PRIMARY="gemini-3.1-flash-lite-preview"
 SECONDARY="grok-4-fast-reasoning"
 SUMMARY="gemini-3.1-flash-lite-preview"
 
+# Concurrency knobs (override via env). BUILD_CONCURRENCY overlaps the slow
+# provider build calls (RAPTOR summaries + GraphRAG extraction/reports);
+# EMBED_CONCURRENCY is OLLAMA_NUM_PARALLEL for a server this script starts.
+BUILD_CONCURRENCY="${PILOT_BUILD_CONCURRENCY:-6}"
+EMBED_CONCURRENCY="${OLLAMA_NUM_PARALLEL:-3}"
+
 CAPS=""
 NUM_RUNS=5
 if [ "$MODE" = "slice" ]; then
@@ -70,8 +76,8 @@ if ! curl -s -o /dev/null --connect-timeout 3 -w "%{http_code}" \
     echo "[main-study]   on Windows)." >&2
     exit 1
   fi
-  echo "[main-study] starting Ollama (OLLAMA_NUM_PARALLEL=1)"
-  OLLAMA_NUM_PARALLEL=1 ollama serve > /tmp/ollama.log 2>&1 &
+  echo "[main-study] starting Ollama (OLLAMA_NUM_PARALLEL=$EMBED_CONCURRENCY)"
+  OLLAMA_NUM_PARALLEL="$EMBED_CONCURRENCY" ollama serve > /tmp/ollama.log 2>&1 &
   for _ in $(seq 1 60); do
     if curl -s -o /dev/null --connect-timeout 1 -w "%{http_code}" \
           http://localhost:11434/api/tags | grep -q "200"; then break; fi
@@ -86,6 +92,8 @@ fi
 
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1
 export OLLAMA_EMBED_CACHE_DIR=outputs/embed_cache
+export PILOT_BUILD_CONCURRENCY="$BUILD_CONCURRENCY"
+echo "[main-study] build concurrency: gemini=$BUILD_CONCURRENCY, embed(OLLAMA_NUM_PARALLEL)=$EMBED_CONCURRENCY"
 
 COMMON="--split full $CAPS --datasets qasper novelqa \
   --architectures flat naive_rag raptor graphrag \
@@ -113,6 +121,11 @@ run_with_resume() {  # $1=label, rest=runner args
     before=$(pred_rows)
     echo "[main-study] $label attempt $attempt/$max (predictions so far: $before)"
     if "$PYTHON" -m pilot.cli.step_3_dry_run "$@"; then return 0; fi
+    rc=$?
+    if [ "$rc" -eq 3 ]; then
+      echo "[main-study] $label ABORTED (fatal, exit 3) -- not resuming. Fix the issue above, then re-run." >&2
+      return 1
+    fi
     after=$(pred_rows)
     echo "[main-study] $label crashed/interrupted; resuming in place ($before -> $after)" >&2
     if [ "$after" -le "$before" ]; then

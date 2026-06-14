@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import pickle
 import re
@@ -58,6 +59,7 @@ from pilot.eval import (
     parse_mc_answer,
 )
 from pilot.ledger import CostLedger, new_run_id
+from pilot.progress import RunProgress, tui_supported
 from pilot.preprocess_cache import (
     CacheRequiredMiss,
     build_cache_key_inputs,
@@ -72,6 +74,21 @@ from pilot.preprocess_cache import (
 )
 from pilot.providers import get_provider
 from pilot.providers.base import CacheControl
+
+
+# Abort the run (fatal, do NOT resume) after this many consecutive invocation
+# failures. A handful of bad documents is normal and self-skips; a long
+# unbroken streak means the infrastructure is broken (e.g. expired API key,
+# exhausted quota) and continuing would only spend more budget writing a grid
+# of empty answers. The launcher treats the fatal exit code as "stop", so it
+# does not resume into the same wall.
+_FATAL_CONSECUTIVE_FAILURES = 30
+# Exit code main() returns on a fatal abort; the launcher must not resume it.
+FATAL_EXIT_CODE = 3
+
+
+class FatalRunError(RuntimeError):
+    """Raised to abort a run that should NOT be auto-resumed."""
 
 
 _DEFAULT_ANSWERER_MODEL = "gemini-3.1-pro-preview"
@@ -174,6 +191,36 @@ def _append_build_failure(run_dir: Path, record: dict[str, Any]) -> None:
             os.fsync(fh.fileno())
         except (OSError, AttributeError):
             pass
+
+
+def _load_failed_builds(run_dir: Path) -> set[tuple[str, str]]:
+    """Set of (architecture, paper_id) whose build already failed.
+
+    A document build (RAPTOR tree / GraphRAG graph) is shared across every
+    question on that document, so once it fails it fails for all of them.
+    Re-attempting it — for the other questions in this run, or after a
+    resume — would re-run the (paid) extraction/summary calls only to fail
+    again. Loading the prior failures lets the loop record those cells as
+    failed WITHOUT re-spending. Tolerant of a torn final line.
+    """
+    path = run_dir / "build_failures.jsonl"
+    out: set[tuple[str, str]] = set()
+    if not path.exists():
+        return out
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            arch = rec.get("architecture")
+            paper = rec.get("paper_id")
+            if arch and paper:
+                out.add((arch, paper))
+    return out
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -649,6 +696,8 @@ def run_dry_run(
     summary_model: str | None = None,
     cache_required: bool = False,
     cache_root: Path | None = None,
+    no_tui: bool = False,
+    num_runs: int = 1,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     if split == "full":
@@ -721,6 +770,25 @@ def run_dry_run(
     )
     failures: list[dict[str, Any]] = []
     build_failures_count: dict[str, int] = defaultdict(int)
+    # (arch, paper_id) builds that already failed — never re-attempt them
+    # (the build is shared across the document's questions; retrying just
+    # re-spends the extraction/summary budget to fail again).
+    failed_builds: set[tuple[str, str]] = _load_failed_builds(run_dir)
+    consecutive_failures = 0
+
+    # Live TUI: a clean two-line display (overall evaluation bar + the current
+    # build's embed/Google activity). Disabled on a non-TTY or with --no-tui,
+    # falling back to the plain per-cell logs. When the TUI is on, quiet the
+    # per-call HTTP + vendored-RAPTOR INFO logging so it does not fight the
+    # live region.
+    tui_enabled = tui_supported() and not no_tui
+    if tui_enabled:
+        for _name in ("httpx", "httpcore", "urllib3"):
+            logging.getLogger(_name).setLevel(logging.WARNING)
+        logging.getLogger().setLevel(logging.WARNING)
+    verbose = not tui_enabled
+    progress = RunProgress(enabled=tui_enabled)
+    ledger.progress_hook = progress.on_row
 
     if completed:
         print(
@@ -789,6 +857,13 @@ def run_dry_run(
     resolved_summary_model = summary_model or answerer_model
     disk_cache_root = cache_root if cache_root is not None else default_cache_root()
 
+    progress.__enter__()
+    progress.start_eval(
+        total=len(items) * len(architectures),
+        completed=len(completed),
+        run_index=run_index,
+        num_runs=num_runs,
+    )
     try:
         for item in items:
             paper_id = item["paper_id"]
@@ -796,15 +871,17 @@ def run_dry_run(
                 tag = f"{arch}/{item['dataset']}/{paper_id}/{item['question_id']}#r{run_index}"
                 key = (arch, paper_id, item["question_id"], run_index)
                 if key in completed:
-                    print(f"[step3-dry-run] SKIP {tag} (already done)", file=sys.stderr)
+                    if verbose:
+                        print(f"[step3-dry-run] SKIP {tag} (already done)", file=sys.stderr)
                     continue
                 cache_key = (arch, paper_id)
                 cached_state = preprocessing_cache.get(cache_key)
                 if cached_state is not None and arch in {"naive_rag", "raptor", "graphrag"}:
-                    print(
-                        f"[step3-dry-run] HIT  {tag} preprocessing cached (in-process)",
-                        file=sys.stderr,
-                    )
+                    if verbose:
+                        print(
+                            f"[step3-dry-run] HIT  {tag} preprocessing cached (in-process)",
+                            file=sys.stderr,
+                        )
 
                 # Disk-cache consult for RAPTOR + GraphRAG. Naive RAG's
                 # build is fast and deterministic (chunk + BGE-M3
@@ -884,50 +961,84 @@ def run_dry_run(
                             file=sys.stderr,
                         )
 
+                # Will this cell actually build a (shared) preprocessing
+                # artefact? Only RAPTOR/GraphRAG/Naive-RAG on a cache MISS.
+                will_build = cached_state is None and arch in {"naive_rag", "raptor", "graphrag"}
                 # Snapshot the ledger position BEFORE the call so we
                 # can capture the preprocess rows the runner emits on
                 # a build (used to populate build_meta after the call).
                 pre_call_ledger_offset = ledger_byte_size(ledger)
-                try:
-                    result = _invoke_architecture(
-                        arch,
-                        item,
-                        answerer=answerer,
-                        answerer_model=answerer_model,
-                        embedder=embedder,
-                        chunker=chunker,
-                        ledger=ledger,
-                        naive_rag_top_k=naive_rag_top_k,
-                        prompt_style=prompt_style,
-                        run_index=run_index,
-                        summary_answerer=summary_answerer,
-                        summary_model=summary_model,
-                        cached_state=cached_state,
+                if will_build and (arch, paper_id) in failed_builds:
+                    # This document's build already failed (this run or an
+                    # earlier one). The build is shared across all of the
+                    # document's questions, so re-running it would only
+                    # re-spend the extraction/summary budget to fail again.
+                    # Record a counted, flagged failure and move on.
+                    skip_msg = (
+                        f"[step3-dry-run] SKIP-FAILED-BUILD {tag} "
+                        f"(prior build failure for {arch}/{paper_id})"
                     )
-                except Exception as exc:
-                    failures.append({
-                        "architecture": arch,
-                        "dataset": item["dataset"],
-                        "paper_id": item["paper_id"],
-                        "question_id": item["question_id"],
-                        "run_index": run_index,
-                        "error": repr(exc),
-                        "traceback": traceback.format_exc(),
-                    })
-                    print(f"[step3-dry-run] FAIL {tag}: {exc!r}", file=sys.stderr)
-                    # Do NOT silently drop the cell. Fall through with a
-                    # synthetic failed result so it is scored as wrong
-                    # (denominator parity with Flat/Naive, which never fail
-                    # to build) and written + counted as a build failure
-                    # rather than vanishing from the analysis. A vanished
-                    # cell would silently thin this architecture's
-                    # denominator and bias the cross-architecture ranking.
+                    progress.log(skip_msg) if tui_enabled else print(skip_msg, file=sys.stderr)
                     result = ArchitectureResult(
                         architecture=arch,
                         predicted_answer="",
                         failed=True,
-                        failure_reason=repr(exc),
+                        failure_reason="skipped: prior build failure for this document",
                     )
+                else:
+                    if will_build:
+                        progress.start_build(f"{paper_id} · {arch}")
+                    try:
+                        result = _invoke_architecture(
+                            arch,
+                            item,
+                            answerer=answerer,
+                            answerer_model=answerer_model,
+                            embedder=embedder,
+                            chunker=chunker,
+                            ledger=ledger,
+                            naive_rag_top_k=naive_rag_top_k,
+                            prompt_style=prompt_style,
+                            run_index=run_index,
+                            summary_answerer=summary_answerer,
+                            summary_model=summary_model,
+                            cached_state=cached_state,
+                        )
+                        consecutive_failures = 0  # a success breaks the streak
+                    except Exception as exc:
+                        failures.append({
+                            "architecture": arch,
+                            "dataset": item["dataset"],
+                            "paper_id": item["paper_id"],
+                            "question_id": item["question_id"],
+                            "run_index": run_index,
+                            "error": repr(exc),
+                            "traceback": traceback.format_exc(),
+                        })
+                        fail_msg = f"[step3-dry-run] FAIL {tag}: {exc!r}"
+                        progress.log(fail_msg) if tui_enabled else print(fail_msg, file=sys.stderr)
+                        consecutive_failures += 1
+                        # Remember a failed BUILD so the document's remaining
+                        # questions (and any resume) skip it instead of paying
+                        # to rebuild-and-fail.
+                        if will_build:
+                            failed_builds.add((arch, paper_id))
+                        # Do NOT silently drop the cell. Fall through with a
+                        # synthetic failed result so it is scored as wrong
+                        # (denominator parity with Flat/Naive, which never fail
+                        # to build) and written + counted as a build failure
+                        # rather than vanishing from the analysis. A vanished
+                        # cell would silently thin this architecture's
+                        # denominator and bias the cross-architecture ranking.
+                        result = ArchitectureResult(
+                            architecture=arch,
+                            predicted_answer="",
+                            failed=True,
+                            failure_reason=repr(exc),
+                        )
+                    finally:
+                        if will_build:
+                            progress.end_build()
 
                 # Cache the preprocessing artefact for future questions
                 # on this paper. Only RAPTOR/GraphRAG return a non-None
@@ -1026,7 +1137,8 @@ def run_dry_run(
                         "failure_reason": result.failure_reason,
                         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     })
-                    print(f"[step3-dry-run] BUILD-FAIL {tag}: {result.failure_reason}", file=sys.stderr)
+                    bf_msg = f"[step3-dry-run] BUILD-FAIL {tag}: {result.failure_reason}"
+                    progress.log(bf_msg) if tui_enabled else print(bf_msg, file=sys.stderr)
                 per_arch_predictions[arch].append(row)
                 # Crash-safe incremental flush. fsync forces the OS
                 # buffer cache to disk so a power loss after the line
@@ -1045,14 +1157,27 @@ def run_dry_run(
                 for metric, value in scores.items():
                     if isinstance(value, (int, float)):
                         per_arch_scores[arch][metric].append(float(value))
-                print(
-                    f"[step3-dry-run] OK   {tag}  "
-                    + " ".join(
-                        f"{m}={v:.3f}" for m, v in scores.items()
-                        if isinstance(v, (int, float))
-                    ),
-                    file=sys.stderr,
-                )
+                if verbose:
+                    print(
+                        f"[step3-dry-run] OK   {tag}  "
+                        + " ".join(
+                            f"{m}={v:.3f}" for m, v in scores.items()
+                            if isinstance(v, (int, float))
+                        ),
+                        file=sys.stderr,
+                    )
+                # This cell is durable on disk; advance the evaluation bar.
+                progress.advance_eval()
+                # Circuit breaker: a long unbroken streak of REAL invocation
+                # failures (not pre-empted build skips) means the infra is
+                # broken — abort fatally rather than spend more budget filling
+                # the grid with empty answers.
+                if consecutive_failures >= _FATAL_CONSECUTIVE_FAILURES:
+                    raise FatalRunError(
+                        f"{consecutive_failures} consecutive cell failures "
+                        f"(last: {tag}); aborting without resume. Check the "
+                        f"answerer/API configuration and the failures above."
+                    )
 
             # After all architectures have been invoked for this
             # item, decrement the remaining-question counter for the
@@ -1077,6 +1202,7 @@ def run_dry_run(
     finally:
         for fh in pred_files.values():
             fh.close()
+        progress.__exit__(None, None, None)
 
     # No end-of-loop rewrite: every row was already appended + fsync'd
     # incrementally, and prior rows are durable on disk from earlier
@@ -1298,6 +1424,15 @@ def main() -> int:
             "place over the slice's completed cells (no rework)."
         ),
     )
+    parser.add_argument(
+        "--no-tui",
+        action="store_true",
+        help=(
+            "Disable the live progress display (overall evaluation bar + "
+            "per-build embed/Google activity). Auto-disabled on a non-TTY; "
+            "use this to force the plain per-cell logs even on a terminal."
+        ),
+    )
     args = parser.parse_args()
 
     # Resolve the run directory. Resume-in-place: the SAME config maps to
@@ -1318,31 +1453,40 @@ def main() -> int:
     summary: dict[str, Any] = {}
     total_failures = 0
     for ri in indices:
-        summary = run_dry_run(
-            architectures=args.architectures,
-            datasets=args.datasets,
-            answerer_provider=args.answerer_provider,
-            answerer_model=args.answerer_model,
-            embedder_model=args.embedder_model,
-            naive_rag_top_k=args.naive_rag_top_k,
-            data_root=args.data_root,
-            out_dir=args.out,
-            prompt_style=args.prompt_style,
-            run_id=run_id,
-            run_index=ri,
-            runs_root=runs_root,
-            split=args.split,
-            max_docs_per_dataset={
-                k: v for k, v in (
-                    ("qasper", args.max_docs_qasper),
-                    ("novelqa", args.max_docs_novelqa),
-                ) if v is not None
-            },
-            summary_provider=args.summary_provider,
-            summary_model=args.summary_model,
-            cache_required=args.cache_required,
-            cache_root=args.cache_root,
-        )
+        try:
+            summary = run_dry_run(
+                architectures=args.architectures,
+                datasets=args.datasets,
+                answerer_provider=args.answerer_provider,
+                answerer_model=args.answerer_model,
+                embedder_model=args.embedder_model,
+                naive_rag_top_k=args.naive_rag_top_k,
+                data_root=args.data_root,
+                out_dir=args.out,
+                prompt_style=args.prompt_style,
+                run_id=run_id,
+                run_index=ri,
+                runs_root=runs_root,
+                split=args.split,
+                max_docs_per_dataset={
+                    k: v for k, v in (
+                        ("qasper", args.max_docs_qasper),
+                        ("novelqa", args.max_docs_novelqa),
+                    ) if v is not None
+                },
+                summary_provider=args.summary_provider,
+                summary_model=args.summary_model,
+                cache_required=args.cache_required,
+                cache_root=args.cache_root,
+                no_tui=args.no_tui,
+                num_runs=len(indices),
+            )
+        except FatalRunError as exc:
+            # Abort without resuming: the launcher honours FATAL_EXIT_CODE
+            # and will NOT re-invoke (which would just hit the same wall and
+            # spend more budget).
+            print(f"\n[step3-dry-run] FATAL: {exc}", file=sys.stderr)
+            return FATAL_EXIT_CODE
         # Pin the resolved run_id + root so subsequent repeats share the
         # exact same dir even when it was derived canonically on the first.
         run_id = summary["run_id"]
