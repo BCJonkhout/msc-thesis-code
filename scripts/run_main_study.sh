@@ -91,6 +91,7 @@ if ! curl -s -o /dev/null --connect-timeout 3 -w "%{http_code}" \
 fi
 
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 export OLLAMA_EMBED_CACHE_DIR=outputs/embed_cache
 export PILOT_BUILD_CONCURRENCY="$BUILD_CONCURRENCY"
 echo "[main-study] build concurrency: gemini=$BUILD_CONCURRENCY, embed(OLLAMA_NUM_PARALLEL)=$EMBED_CONCURRENCY"
@@ -98,7 +99,7 @@ echo "[main-study] build concurrency: gemini=$BUILD_CONCURRENCY, embed(OLLAMA_NU
 COMMON="--split full $CAPS --datasets qasper novelqa \
   --architectures flat naive_rag raptor graphrag \
   --summary-provider google --summary-model $SUMMARY \
-  --prompt-style literature"
+  --prompt-style literature --tui"
 
 # Total prediction rows on disk -- used to detect whether a crashed
 # attempt made forward progress before resuming.

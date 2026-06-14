@@ -697,6 +697,7 @@ def run_dry_run(
     cache_required: bool = False,
     cache_root: Path | None = None,
     no_tui: bool = False,
+    force_tui: bool = False,
     num_runs: int = 1,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
@@ -781,7 +782,11 @@ def run_dry_run(
     # falling back to the plain per-cell logs. When the TUI is on, quiet the
     # per-call HTTP + vendored-RAPTOR INFO logging so it does not fight the
     # live region.
-    tui_enabled = tui_supported() and not no_tui
+    # --tui forces the live display on even when stdout does not report as a
+    # TTY (the common reason the bar fails to appear under wrapper scripts /
+    # integrated terminals); rich renders via force_terminal. --no-tui always
+    # wins. With neither flag, auto-detect.
+    tui_enabled = (force_tui or tui_supported()) and not no_tui
     if tui_enabled:
         for _name in ("httpx", "httpcore", "urllib3"):
             logging.getLogger(_name).setLevel(logging.WARNING)
@@ -1429,8 +1434,17 @@ def main() -> int:
         action="store_true",
         help=(
             "Disable the live progress display (overall evaluation bar + "
-            "per-build embed/Google activity). Auto-disabled on a non-TTY; "
-            "use this to force the plain per-cell logs even on a terminal."
+            "per-build embed/Google activity) and use the plain per-cell logs."
+        ),
+    )
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help=(
+            "Force the live progress display ON even when stdout does not "
+            "report as a TTY (integrated terminals, wrapper scripts). This is "
+            "the usual reason the bar does not appear; rich renders via "
+            "force_terminal. --no-tui overrides this."
         ),
     )
     args = parser.parse_args()
@@ -1479,6 +1493,7 @@ def main() -> int:
                 cache_required=args.cache_required,
                 cache_root=args.cache_root,
                 no_tui=args.no_tui,
+                force_tui=args.tui,
                 num_runs=len(indices),
             )
         except FatalRunError as exc:

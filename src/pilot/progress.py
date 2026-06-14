@@ -50,39 +50,68 @@ class RunProgress:
     def __enter__(self) -> "RunProgress":
         if not self.enabled:
             return self
-        from rich.console import Group
-        from rich.live import Live
-        from rich.progress import (
-            BarColumn, MofNCompleteColumn, Progress, SpinnerColumn,
-            TaskProgressColumn, TextColumn, TimeElapsedColumn,
-            TimeRemainingColumn,
-        )
-        self._eval = Progress(
-            SpinnerColumn(),
-            TextColumn("[bold blue]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TaskProgressColumn(),
-            TextColumn("elapsed"),
-            TimeElapsedColumn(),
-            TextColumn("eta"),
-            TimeRemainingColumn(),
-        )
-        self._build = Progress(
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-        )
-        self._live = Live(
-            Group(self._eval, self._build),
-            refresh_per_second=6,
-            transient=False,
-            # Capture stray stdout/stderr (per-document cache logs, provider
-            # warnings) and render them above the live region instead of
-            # letting them tear the bars.
-            redirect_stdout=True,
-            redirect_stderr=True,
-        )
-        self._live.__enter__()
+        try:
+            import sys
+            # Windows consoles often default to a legacy code page (cp1252)
+            # that cannot encode the bar/spinner glyphs; the first redraw then
+            # raises UnicodeEncodeError and kills the run. Force UTF-8 and
+            # NEVER hard-fail on a stray glyph (errors="replace").
+            for _stream in (sys.stdout, sys.stderr):
+                try:
+                    _stream.reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+            from rich.console import Console, Group
+            from rich.live import Live
+            from rich.progress import (
+                BarColumn, MofNCompleteColumn, Progress, SpinnerColumn,
+                TaskProgressColumn, TextColumn, TimeElapsedColumn,
+                TimeRemainingColumn,
+            )
+            # force_terminal=True so the live region renders even when stdout
+            # does not report as a TTY (integrated terminals, wrapper scripts) —
+            # the usual reason the bar silently fails to appear.
+            # legacy_windows=False keeps rich on the modern ANSI/VT renderer
+            # (Win10+/Win11 support it) instead of the legacy console-API path
+            # that encodes through the active code page and crashes on glyphs.
+            console = Console(force_terminal=True, legacy_windows=False)
+            self._eval = Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TaskProgressColumn(),
+                TextColumn("elapsed"),
+                TimeElapsedColumn(),
+                TextColumn("eta"),
+                TimeRemainingColumn(),
+                console=console,
+            )
+            self._build = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                console=console,
+            )
+            self._live = Live(
+                Group(self._eval, self._build),
+                console=console,
+                refresh_per_second=6,
+                transient=False,
+                # Capture stray stdout/stderr (per-document cache logs, provider
+                # warnings) and render them above the live region instead of
+                # letting them tear the bars.
+                redirect_stdout=True,
+                redirect_stderr=True,
+            )
+            self._live.__enter__()
+        except Exception as exc:
+            # Never let a display problem take down the run — fall back to
+            # plain logging and say why.
+            import sys
+            self.enabled = False
+            self._live = None
+            print(f"[progress] live display unavailable ({exc!r}); using plain logs",
+                  file=sys.stderr)
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -164,7 +193,7 @@ class RunProgress:
         self._build.update(
             self._build_task,
             description=(
-                f"🔨 building [bold]{label}[/bold] · "
+                f"building [bold]{label}[/bold] · "
                 f"embeds [cyan]{embeds}[/cyan] · google [magenta]{google}[/magenta]"
             ),
         )

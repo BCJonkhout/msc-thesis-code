@@ -147,6 +147,13 @@ if (-not (Initialize-Ollama)) {
     exit 1
 }
 
+# UTF-8 console so the live progress glyphs (spinner / bar) render on a legacy
+# (cp1252) Windows console instead of crashing the run on the first redraw.
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+try { chcp 65001 > $null 2>&1 } catch {}
+
 $env:PYTHONUNBUFFERED = '1'
 $env:OMP_NUM_THREADS = '1'
 $env:NUMBA_NUM_THREADS = '1'
@@ -163,7 +170,11 @@ $common = @(
     '--split', 'full', '--datasets', 'qasper', 'novelqa',
     '--architectures', 'flat', 'naive_rag', 'raptor', 'graphrag',
     '--summary-provider', 'google', '--summary-model', $summary,
-    '--prompt-style', 'literature'
+    '--prompt-style', 'literature',
+    # Force the live progress display on: this script is interactive, but
+    # stdout often does not report as a TTY under a wrapper / integrated
+    # terminal, which would otherwise silently fall back to plain logs.
+    '--tui'
 )
 # N protocol: N=5 per cell (pre-registered). Builds run once (cached); the
 # five answer passes reuse them, so N=5 is answer-only on top of the
