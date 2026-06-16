@@ -865,7 +865,10 @@ def run_dry_run(
     progress.__enter__()
     progress.start_eval(
         total=len(items) * len(architectures),
-        completed=len(completed),
+        # Count only THIS run_index's already-done cells. ``completed`` spans
+        # every run_index in the shared run dir, so for a repeat pass (N>0) the
+        # full set would overshoot this pass's own total.
+        completed=sum(1 for k in completed if k[-1] == run_index),
         run_index=run_index,
         num_runs=num_runs,
     )

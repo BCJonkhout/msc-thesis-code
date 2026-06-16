@@ -1,0 +1,290 @@
+# Price card variant: cached-input reads priced at 0.1x the uncached input rate.
+#
+# Identical to `price_card.yaml` in schema and in every uncached-input and
+# output rate. The ONLY change: every model's `input_cached_read` rate is set
+# to exactly one tenth of that model's uncached input rate. This isolates a
+# single sensitivity axis -- the depth of the prompt-caching discount -- so the
+# deployment-cost and break-even figures can be reported under a uniform,
+# aggressive 10x cache discount alongside the providers' published per-model
+# discounts in `price_card.yaml`.
+#
+# Rationale for a flat 0.1x: published cache-read discounts cluster between
+# ~4x (DeepSeek, ~1/100) and ~10x (Anthropic/Google/OpenAI, ~1/10). A uniform
+# 10x floor is the conservative end of the "deep discount" regime and makes the
+# cross-architecture comparison depend on token volume rather than on each
+# provider's idiosyncratic cache-tier pricing. The architecture that is
+# preprocessing-heavy (RAPTOR, GraphRAG) re-reads the same large context across
+# repeats and questions, so it is the most cache-discount-sensitive; pricing it
+# under both the published card and this uniform-discount card brackets the
+# realistic range.
+#
+# Every value carries a `source:` tag per the same reproducibility rule as
+# `price_card.yaml`. The cache-read rows use the `rule:` prefix to mark them as
+# a derived methodology default rather than a provider-doc snapshot.
+
+# --- Sampling settings (locked workspace-wide) -------------------------------
+sampling:
+  temperature:
+    value: 0
+    source: pilot:5.8#sampling-temperature
+  top_p:
+    value: 1.0
+    source: rule:greedy-decoding-default
+
+# --- Cost-attribution rule (locked) ------------------------------------------
+cost_attribution:
+  rule: run_index_0_only
+  source: rule:option-A
+  description: >
+    Cost is computed from run_index == 0 only.
+    Runs 2..N contribute to variance reporting but not to deployment cost.
+    Avoids artificial cache amplification within the variance protocol.
+
+# --- Storage rate (locked) ---------------------------------------------------
+storage:
+  rate_usd_per_gib_month:
+    value: 0.023
+    source: rule:s3-standard-2026-04
+    description: AWS S3 Standard list price as of 2026-04
+  study_horizon_days:
+    value: 90
+    source: pilot:6
+
+# --- Local-equivalent GPU rate (locked) --------------------------------------
+gpu:
+  device: rtx-4070-laptop
+  usd_per_hour:
+    value: 0.30
+    source: rule:consumer-gpu-community-cloud-2026-06
+    description: >
+      Community-cloud hourly rate for a comparable consumer GPU
+      (RTX 4070 / 4080-class, ~$0.20-0.40/hr). Thesis default informed by
+      public community GPU-cloud list prices; the exact value is a protocol
+      default rather than a single canonical SKU.
+  usd_per_second: 0.0000833
+
+# --- Provider rate cards -----------------------------------------------------
+# input_uncached and output rates copied verbatim from price_card.yaml.
+# input_cached_read = 0.1 x the model's uncached input rate (see header).
+providers:
+  anthropic:
+    snapshot_date: 2026-04-29
+    source: provider:platform.claude.com/docs/en/build-with-claude/prompt-caching
+    cache_ttl_minutes:
+      ephemeral_default: 5
+      extended_tier: 60
+    cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    models:
+      claude-sonnet-4-6:
+        input_uncached: 3.00
+        input_cached_read: 0.30      # rule:cache-discount-0.1x of 3.00
+        cache_write_5m: 3.75
+        cache_write_1h: 6.00
+        output: 15.00
+      claude-opus-4-7:
+        input_uncached: 5.00
+        input_cached_read: 0.50      # rule:cache-discount-0.1x of 5.00
+        cache_write_5m: 6.25
+        cache_write_1h: 10.00
+        output: 25.00
+
+  openai:
+    snapshot_date: 2026-05-02
+    source: provider:developers.openai.com/api/docs/guides/prompt-caching
+    cache_ttl_minutes:
+      automatic_default: 60
+      extended_24h_tier: 1440
+    cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    models:
+      gpt-5.4:
+        input_uncached_below_272k: 2.50
+        input_uncached_above_272k: 5.00
+        input_cached_read: 0.25      # rule:cache-discount-0.1x of 2.50 (below-272k base)
+        output_below_272k: 15.00
+        output_above_272k: 22.50
+        context_window_tokens: 1050000
+        source: provider:developers.openai.com/api/docs/models/gpt-5.4
+
+      gpt-5.4-pro:
+        input_uncached: 15.00
+        input_cached_read: 1.50      # rule:cache-discount-0.1x of 15.00
+        output: 90.00
+        context_window_tokens: 1050000
+        verification_required: true
+        source: provider:developers.openai.com/api/docs/models/gpt-5.4-pro
+
+      gpt-5.5:
+        input_uncached_below_272k: 5.00
+        input_uncached_above_272k: 10.00
+        input_cached_read: 0.50      # rule:cache-discount-0.1x of 5.00 (below-272k base)
+        output_below_272k: 30.00
+        output_above_272k: 45.00
+        context_window_tokens: 1050000
+        source: provider:developers.openai.com/api/docs/models/gpt-5.5
+
+      gpt-5.5-pro:
+        input_uncached: 30.00
+        input_cached_read: 3.00      # rule:cache-discount-0.1x of 30.00
+        output: 180.00
+        context_window_tokens: 1050000
+        verification_required: true
+        source: provider:developers.openai.com/api/docs/models/gpt-5.5-pro
+
+  google:
+    snapshot_date: 2026-04-29
+    source: provider:ai.google.dev/gemini-api/docs/caching
+    cache_ttl_minutes:
+      cached_content_default: 60
+      cached_content_max: 1440
+    cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    models:
+      gemini-3.1-pro-preview:
+        input_uncached_below_200k: 2.00
+        input_uncached_above_200k: 4.00
+        input_cached_read: 0.20      # rule:cache-discount-0.1x of 2.00 (below-200k base)
+        output_below_200k: 12.00
+        output_above_200k: 18.00
+
+      gemini-3.1-flash-lite-preview:
+        input_uncached: 0.10
+        input_cached_read: 0.01      # rule:cache-discount-0.1x of 0.10
+        output: 0.40
+        source: provider:ai.google.dev/gemini-api/docs/pricing 2026-04
+
+      gemini-flash-latest:
+        input_uncached: 0.30
+        input_cached_read: 0.03      # rule:cache-discount-0.1x of 0.30
+        output: 2.50
+        source: provider:ai.google.dev/gemini-api/docs/pricing 2026-04
+
+  dashscope:
+    snapshot_date: 2026-04-29
+    source: provider:alibabacloud.com/help/en/model-studio/context-cache
+    cache_ttl_minutes:
+      ephemeral_only: 5
+    cache_ttl_source: thesis-msc/notes/cache_ttl_per_provider.md
+    status: not_accessible
+    models:
+      qwen3.6-27b:
+        input_uncached: 0.80
+        input_cached_read: 0.08      # rule:cache-discount-0.1x of 0.80
+        output: 1.20
+        verification_required: true
+
+  xai:
+    snapshot_date: 2026-05-02
+    source: provider:docs.x.ai/docs/api-reference
+    cache_ttl_minutes:
+      automatic_default: 60
+    cache_ttl_source: provider:openrouter.ai/docs/guides/best-practices/prompt-caching
+    notes: >
+      xAI cache-tier TTL is not publicly documented; OpenRouter lists xAI
+      under automatic-caching providers but doesn't specify the window.
+      Verification on first KV-cache check.
+    models:
+      grok-4.3:
+        input_uncached: 3.00
+        input_cached_read: 0.30      # rule:cache-discount-0.1x of 3.00
+        output: 15.00
+        context_window_tokens: 2000000
+        verification_required: true
+        source: provider:docs.x.ai/docs/api-reference
+
+      grok-4-1-fast-non-reasoning:
+        input_uncached: 0.50
+        input_cached_read: 0.05      # rule:cache-discount-0.1x of 0.50
+        output: 1.50
+        context_window_tokens: 2000000
+        verification_required: true
+
+      grok-4-fast-reasoning:
+        input_uncached: 0.50
+        input_cached_read: 0.05      # rule:cache-discount-0.1x of 0.50
+        output: 1.50
+        context_window_tokens: 2000000
+        verification_required: true
+
+      grok-4.20-0309-non-reasoning:
+        input_uncached: 1.00
+        input_cached_read: 0.10      # rule:cache-discount-0.1x of 1.00
+        output: 5.00
+        context_window_tokens: 2000000
+        verification_required: true
+
+      grok-4.20-0309-reasoning:
+        input_uncached: 1.00
+        input_cached_read: 0.10      # rule:cache-discount-0.1x of 1.00
+        output: 5.00
+        context_window_tokens: 2000000
+        verification_required: true
+
+  openrouter:
+    snapshot_date: 2026-05-02
+    source: provider:openrouter.ai/api/v1/models
+    cache_ttl_minutes:
+      varies_by_route: true
+    cache_ttl_source: provider:openrouter.ai/docs/quickstart
+    notes: >
+      OpenRouter is an aggregator that routes requests to underlying
+      providers (Groq, DeepInfra, Together, Fireworks, etc.). Cache
+      behaviour and TTL therefore vary by which provider serves the
+      request. Prompt caching is supported in aggregate; exact TTL
+      should be verified at run time via the per-row
+      `cached_input_tokens` field.
+    models:
+      deepseek/deepseek-v4-pro:
+        input_uncached: 0.43
+        input_cached_read: 0.043     # rule:cache-discount-0.1x of 0.43
+        output: 0.87
+        context_window_tokens: 1048576
+        source: provider:openrouter.ai/deepseek/deepseek-v4-pro
+        notes: >
+          Uniform 0.1x cache-discount card. The published card prices this
+          row's cache read at 1/100th of uncached; this variant uses the
+          conservative 1/10th floor instead.
+
+      deepseek/deepseek-v4-flash:
+        input_uncached: 0.14
+        input_cached_read: 0.014     # rule:cache-discount-0.1x of 0.14
+        output: 0.28
+        context_window_tokens: 1048576
+        source: provider:openrouter.ai/deepseek/deepseek-v4-flash
+        notes: Cheaper DeepSeek-V4 variant; same long-context window.
+
+      moonshotai/kimi-k2.6:
+        input_uncached: 0.60
+        input_cached_read: 0.06      # rule:cache-discount-0.1x of 0.60
+        output: 2.50
+        context_window_tokens: 262142
+        verification_required: true
+        source: provider:openrouter.ai/moonshotai/kimi-k2.6
+        notes: 256k context cap. Restricted to QASPER + truncated NovelQA.
+
+# --- Embedding rate cards (closed APIs only; open-weights = local GPU) --------
+embedding_providers:
+  openai:
+    text-embedding-3-large:
+      input: 0.13
+      source: provider:platform.openai.com/docs/models/text-embedding-3-large
+  google:
+    gemini-embedding-001:
+      input: 0.15
+      source: provider:developers.googleblog.com/gemini-embedding-available-gemini-api/
+  voyage:
+    voyage-3-large:
+      input: 0.18
+      source: provider:docs.voyageai.com/docs/pricing
+  cohere:
+    embed-v4:
+      input: 0.12
+      source: provider:docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-embed-v4.html
+
+# --- Cross-model stability check (Phase F) cache pinning ----------------------
+cross_model_check:
+  cache_ttl_pin_minutes: 5
+  source: pilot:5.8#16
+  rationale: >
+    DashScope's 5-min cap is the binding constraint. Pinning all providers
+    to 5-min ephemeral makes the comparison apples-to-apples on
+    serving-stack cache headroom rather than confounding architecture
+    differences with cache-tier choices.

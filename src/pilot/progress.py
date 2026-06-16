@@ -181,7 +181,9 @@ class RunProgress:
             self._spin += 1
             total = self._total or 1
             done = self._done
-            pct = 100.0 * done / total
+            # Clamp the displayed percentage so a counting edge case can never
+            # render an absurd >100% bar.
+            pct = min(100.0, 100.0 * done / total)
             nfill = max(0, min(24, int(round(24 * done / total))))
             bar = "#" * nfill + "." * (24 - nfill)
             elapsed = max(1e-6, now - self._t0)
