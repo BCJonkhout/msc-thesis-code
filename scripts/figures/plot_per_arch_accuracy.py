@@ -7,6 +7,11 @@ glance.
 
 Reads:  code/outputs/sanity/kendall_cross_dataset_under_gold_20260520.json
 Writes: thesis-msc/figures/results/per_arch_accuracy.{pdf,png}
+
+Provenance (see docs/CODEMAP.md): RETIRED. SUPERSEDED by the accuracy_by_arch
+figure in figures_main_study.py, which is the canonical per-architecture quality
+plot for the main study. The "rank-inversion" this chart was built to surface was
+REFUTED by the main study (flat wins both datasets); kept only for history.
 """
 
 from __future__ import annotations

@@ -18,6 +18,13 @@
 #
 # Idempotent — safe to run repeatedly. The same config always maps to
 # the same run dir; the append-only ledger keeps every prior cost row.
+#
+# Provenance (see docs/CODEMAP.md): PILOT-ERA launcher. Crash-recovery resume
+# helper for the Phase F.1 v2 sweep (the early QASPER-only fixed-RAPTOR/GraphRAG
+# run on Flash Lite). The main study runs through the per-provider / per-dataset
+# lane launchers, which are themselves resume-in-place by canonical run dir, so
+# this standalone resume helper is no longer on the canonical path. Kept for
+# history.
 
 set -euo pipefail
 

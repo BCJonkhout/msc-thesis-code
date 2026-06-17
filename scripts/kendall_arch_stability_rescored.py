@@ -26,6 +26,12 @@ Computes TWO Kendall analyses for each consensus variant (full and LOO):
      the same architecture as the better one (tau == +1).
 
 Decision threshold: tau >= 0.67 (pre-registered in Phase F.1).
+
+Provenance: PILOT-ERA. The rescored stage of the architecture-rank-
+stability tau-b series (consensus-oracle -> rescored -> held-out-gold
+lineage); consumes the patched-parser rescored consensus scores.
+Superseded by the held-out-gold variant. Kept as a reproducibility
+record; not the source of a current paper claim.
 """
 from __future__ import annotations
 

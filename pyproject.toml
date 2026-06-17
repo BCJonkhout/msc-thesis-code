@@ -1,7 +1,7 @@
 [project]
 name = "pilot"
 version = "0.1.0"
-description = "Step 0 plumbing scaffold for the long-context QA benchmark pilot. Cost ledger, prompt template harness, KV-cache verification, MC answer post-processor, provider abstraction layer."
+description = "Four-architecture long-context QA benchmark (flat, naive RAG, RAPTOR, GraphRAG) over QASPER and NovelQA. Cost ledger, prompt template harness, KV-cache verification, answer post-processor, and provider abstraction layer."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

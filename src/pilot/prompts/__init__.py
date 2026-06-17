@@ -2,7 +2,7 @@
 
 Two templates live as plain text files under this package:
 - qa_freeform.txt        QASPER (free-form answers)
-- qa_multiplechoice.txt  NovelQA, QuALITY (multiple choice)
+- qa_multiplechoice.txt  NovelQA (multiple choice)
 
 Templates are byte-identical across architectures except for the
 `{context}` payload, which differs by retrieval strategy. The loader

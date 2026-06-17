@@ -24,6 +24,12 @@ Decision rule (pre-registered Phase F.1):
   tau < 0.33                              => interaction is real
 
 Outputs ``outputs/sanity/novelqa_kendall_under_gold_20260519.json``.
+
+Provenance: PILOT-ERA. The held-out-gold (Codabench) stage of the
+architecture-rank-stability tau-b series (consensus-oracle -> rescored ->
+held-out-gold lineage); replaces the local consensus oracle with
+Codabench gold T/F per question. Kept as a reproducibility record; not
+the source of a current paper claim.
 """
 from __future__ import annotations
 

@@ -12,6 +12,13 @@ Run from ``code/``::
 
 Writes ``outputs/sanity/novelqa_grid_summary.json`` and prints a
 text table to stdout.
+
+Provenance: PILOT-ERA reporting. Summarises the NovelQA Phase G grid
+cost + completion per candidate from the ledger; its
+``novelqa_grid_summary.json`` is consumed by the pilot ``rank_table.py``.
+Superseded by the main-study cost path (``breakeven_main_study.py`` /
+``tables_main_study.py``). Kept as a reproducibility record; not the
+source of a current paper claim.
 """
 from __future__ import annotations
 

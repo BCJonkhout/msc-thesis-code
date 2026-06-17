@@ -1,5 +1,9 @@
 """OpenAI adapter.
 
+Retained for rejected candidates (gpt-5.4 and the gpt-5.5 / pro
+variants; see configs/models.yaml#rejected_candidates) so the slate is
+reinstateable; not on the main-study answerer path.
+
 OpenAI prefix-caching is automatic; the `prompt_cache_retention="24h"`
 parameter is available on GPT-5.1+ to extend the default short-window
 cache to 24 hours. CacheControl.DISABLED cannot truly disable OpenAI's

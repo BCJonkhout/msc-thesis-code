@@ -22,6 +22,12 @@ verdict JSON.
 
 Output schema mirrors the NovelQA gold file shape to keep downstream
 Kendall scripts straight to wire up.
+
+Provenance: PILOT-ERA. The QASPER rerun (2026-05-20) gold Answer-F1
+aggregation; feeds the pilot cross-dataset tau-b appendix material. The
+canonical main-study QASPER scoring is on the ``build_scored_cells.py``
+path. Kept as a reproducibility record; not the source of a current paper
+claim except the pilot-licensing appendix it supplies.
 """
 from __future__ import annotations
 

@@ -1,4 +1,12 @@
-"""Provider factory: dispatch by name."""
+"""Provider factory: dispatch by name.
+
+The completed main study resolves ``gemini`` / ``google`` here for the
+single answerer (gemini-3.1-flash-lite-preview) and ``xai`` / ``grok``
+for the cross-vendor robustness slice. The ``anthropic``, ``openai``,
+and ``dashscope`` branches stay wired so the rejected-candidate slate
+(configs/models.yaml#rejected_candidates) remains reinstateable without
+code changes.
+"""
 from __future__ import annotations
 
 from pilot.providers.base import AnswererProvider, UnknownProviderError

@@ -6,6 +6,11 @@ observed median for each view.
 
 Reads:  code/outputs/sanity/kendall_cross_dataset_under_gold_20260520.json
 Writes: thesis-msc/figures/results/kendall_distribution.{pdf,png}
+
+Provenance (see docs/CODEMAP.md): RETIRED pilot figure. Reads the same pilot-era
+cross-dataset Kendall bundle whose headline (a cross-dataset rank "inversion") was
+REFUTED by the main study. No current thesis-msc/**/*.tex references this figure;
+canonical result figures come from figures_main_study.py. Kept for history only.
 """
 
 from __future__ import annotations

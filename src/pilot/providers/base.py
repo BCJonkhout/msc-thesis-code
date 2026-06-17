@@ -1,8 +1,10 @@
 """Provider abstraction base class.
 
-Every concrete adapter (anthropic, openai, gemini, dashscope) returns
-a `ProviderResult` with a uniform shape so the cost ledger and price
-card see the same fields regardless of provider.
+Every concrete adapter (anthropic, openai, gemini, dashscope, plus the
+OpenAI-compatible openrouter/xai subclasses) returns a `ProviderResult`
+with a uniform shape so the cost ledger and price card see the same
+fields regardless of provider. The main-study answerer path runs on the
+``gemini`` adapter; the others back the rejected-candidate slate.
 
 Caching is a first-class concept. Each provider has a different
 cache primitive; the abstraction is a `CacheControl` enum that maps

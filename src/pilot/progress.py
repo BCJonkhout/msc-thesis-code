@@ -10,7 +10,7 @@ page.
 
 The line shows overall evaluation progress for this run_index (cells done /
 total, an ASCII bar, throughput, ETA) and, while a document build is in flight,
-its embedding + LLM call counts — so a long build never looks frozen.
+its embedding + LLM call counts — so a long build never looks stalled.
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ class RunProgress:
         if self.enabled:
             self._t0 = time.monotonic()
             self._active = True
-            # Heartbeat: repaint on a timer so the line never looks frozen
+            # Heartbeat: repaint on a timer so the line never looks stalled
             # during a long no-LLM phase (e.g. GraphRAG graph build + Louvain
             # community detection emit no calls to count). The spinner advances
             # and the build-elapsed climbs, showing the run is alive.

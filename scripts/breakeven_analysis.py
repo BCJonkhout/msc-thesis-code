@@ -34,6 +34,14 @@ cost ledger:
 Run from ``code/``::
 
     .venv/Scripts/python.exe scripts/breakeven_analysis.py
+
+Provenance: PILOT-ERA, superseded by ``breakeven_main_study.py``. This
+script carries a known 5x ``run_index`` denominator bug (it filters to
+``run_index == 0`` rows but the N>1 cost is not amortised over the
+repeats), so its break-even figures are NOT the source of any current
+paper number. Retained as a reproducibility record because it produced
+``outputs/sanity/novelqa_breakeven.json`` on disk and was the artifact
+that surfaced the denominator bug now fixed in the main-study path.
 """
 from __future__ import annotations
 

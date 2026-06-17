@@ -18,6 +18,13 @@
 # chain stopped. step_3_dry_run's --resume-from is NOT used here
 # because the v2.1 QASPER and NovelQA runs are separate sweeps; the
 # chain just orchestrates timing.
+#
+# Provenance (see docs/CODEMAP.md): MAIN-STUDY run lane. This is the
+# cross-dataset sequencer: it stalls until the three QASPER provider lanes mark
+# DONE, then launches the three NovelQA Phase G provider lanes (Google / xAI /
+# OpenRouter) in parallel via run_provider_lane_novelqa.sh. Sequencing keeps
+# Ollama (the shared single-threaded BGE-M3 embedder) at a 3-way load ceiling so
+# parallel retrieval builds do not saturate it.
 
 set -euo pipefail
 

@@ -16,6 +16,11 @@ flat predictions on the 15-question slice (empty / unparsed cells
 excluded from the vote).
 
 Output: outputs/sanity/novelqa_local_scores_rerun_20260519.json
+
+Provenance: PILOT-ERA. The 2026-05-19 rerun variant of the consensus-
+oracle NovelQA scoring; SUPERSEDED by held-out Codabench gold
+(``novelqa_codabench_accuracy.py``), which the main study uses instead.
+Kept as a reproducibility record; not the source of a current paper claim.
 """
 from __future__ import annotations
 

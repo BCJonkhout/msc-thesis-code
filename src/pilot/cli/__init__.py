@@ -1,11 +1,13 @@
-"""CLI entrypoints for each pilot step.
+"""CLI entrypoints for the pilot / validation harnesses.
 
-Step 0 (this commit): toy-doc smoke that exercises the full plumbing
-(prompt template → provider call → ledger row write → price-card
-roundtrip).
-
-Steps 1–7 land in subsequent commits as the pilot procedure walks
-forward.
+The ``step_0``–``step_4`` and ``phase_f`` CLIs are the calibration-pilot
+and methodology-validation harnesses, not the canonical main-study path.
+They walk the original pilot procedure forward — from the Step 0 toy-doc
+smoke that exercises the full plumbing (prompt template → provider call →
+ledger row write → price-card roundtrip) through the later phases — and are
+retained as the reproducibility record behind the validation step. The
+canonical main-study drivers live alongside the analysis scripts (see
+code/docs/CODEMAP.md), not here.
 
 Importing this module loads environment variables from `code/.env`
 or `./.env` if present (process env takes precedence).

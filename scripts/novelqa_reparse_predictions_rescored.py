@@ -32,6 +32,11 @@ Also dumps a parser-impact summary at
 Run from ``code/``::
 
     .venv/Scripts/python.exe scripts/novelqa_reparse_predictions_rescored.py
+
+Provenance: PILOT-ERA prediction-repair step (re-parses Phase G NovelQA MC
+answers with the patched parser, b9ce51d, and flags empty cells); feeds
+the rescored consensus/gold tau-b scripts. Kept as a reproducibility
+record; not the source of a current paper claim.
 """
 from __future__ import annotations
 

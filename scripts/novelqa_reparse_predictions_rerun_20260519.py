@@ -15,6 +15,11 @@ once.
 Run from ``code/``::
 
     .venv/Scripts/python.exe scripts/novelqa_reparse_predictions_rerun_20260519.py
+
+Provenance: PILOT-ERA prediction-repair step for the 2026-05-19 rerun
+(re-parses RAPTOR/GraphRAG MC answers with the patched parser, b9ce51d);
+feeds the rescored consensus/gold tau-b scripts. Kept as a reproducibility
+record; not the source of a current paper claim.
 """
 from __future__ import annotations
 

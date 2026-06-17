@@ -249,9 +249,9 @@ class _LedgerQAModel(BaseQAModel):
     """Adapter routing the answer call through the answerer + ledger.
 
     A single QA model instance handles both free-form (QASPER) and
-    multiple-choice (NovelQA / QuALITY) questions. The active
-    options dict is set on the instance immediately before each
-    ``answer_question`` call by the architecture wrapper below.
+    multiple-choice (NovelQA) questions. The active options dict is
+    set on the instance immediately before each ``answer_question``
+    call by the architecture wrapper below.
     """
 
     def __init__(

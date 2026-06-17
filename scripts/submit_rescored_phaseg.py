@@ -11,6 +11,13 @@ JSON against the local consensus-oracle scores.
 Throttle: 60s between submission starts to be friendly to the
 Codabench shared queue. Per-submission retry budget is 3 for
 transient network / 5xx failures.
+
+Provenance (see docs/CODEMAP.md): PILOT-ERA Codabench submission driver. This is
+the one-off that produced the 2026-05-16 consensus-oracle-vs-gold comparison over
+the rescored Phase G grid (the ~25pp median gap that motivated scoring NovelQA
+against the official leaderboard). It is not part of the canonical main-study
+pipeline; the main study uses novelqa_codabench_accuracy / build_scored_cells.
+Kept for the historical audit trail of the gold-vs-consensus validation.
 """
 from __future__ import annotations
 

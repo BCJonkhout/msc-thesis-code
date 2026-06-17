@@ -1,5 +1,9 @@
 """Anthropic adapter.
 
+Retained for rejected candidates (claude-sonnet-4-6, claude-opus-4-7;
+see configs/models.yaml#rejected_candidates) so the slate is
+reinstateable; not on the main-study answerer path.
+
 Maps `CacheControl` to Anthropic's `cache_control: ephemeral` block
 on the last message content. The 1h extended tier requires the
 `extended-cache-ttl-2025-04-11` beta header plus `cache_control.ttl="1h"`

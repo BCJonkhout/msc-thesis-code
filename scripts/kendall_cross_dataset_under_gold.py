@@ -27,6 +27,12 @@ cross-dataset claim is supported. If they diverge sharply the
 divergence is reported as the finding.
 
 Output: ``outputs/sanity/kendall_cross_dataset_under_gold_20260520.json``
+
+Provenance: PILOT-ERA. Computes the cross-dataset (QASPER || NovelQA)
+tau-b under held-out gold. The tau-b material this produces backs the
+paper's ``tab:results-tau`` in the pilot-licensing appendix, so it is the
+documented source for that single appendix table; it is otherwise off the
+canonical main-study path. Kept as a reproducibility record.
 """
 from __future__ import annotations
 

@@ -1,5 +1,9 @@
 """Alibaba DashScope adapter for Qwen3.6-27B (and other open-weights via API).
 
+Retained for rejected candidates (qwen3.6-27b, not accessible in this
+setup; see configs/models.yaml#rejected_candidates) so the slate is
+reinstateable; not on the main-study answerer path.
+
 DashScope's prompt cache is 5-minute ephemeral only — no extended
 tier. The audit at thesis-msc/notes/cache_ttl_per_provider.md flags
 this as the binding constraint that drives the cross-model

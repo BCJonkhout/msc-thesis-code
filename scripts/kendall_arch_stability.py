@@ -13,6 +13,13 @@ robustness check is triggered when any pair falls below it.
 Run from ``code/``::
 
     .venv/Scripts/python.exe scripts/kendall_arch_stability.py
+
+Provenance: PILOT-ERA. First entry in the architecture-rank-stability
+tau-b series (consensus-oracle -> rescored -> held-out-gold lineage).
+Scores against the cross-candidate consensus oracle in
+``novelqa_local_scores.json``; superseded downstream by the rescored and
+held-out-gold variants. Kept as a reproducibility record; not the source
+of a current paper claim.
 """
 from __future__ import annotations
 

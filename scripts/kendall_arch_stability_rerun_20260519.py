@@ -24,6 +24,12 @@ Decision rule (pre-registered Phase F.1 / phase_g_rerun_preregistration):
   tau >= 0.67 AND >=75% pairs STABLE => "context-divergence artefact"
   tau in [0.33, 0.67)                => "mixed signal"
   tau < 0.33                          => "interaction is real"
+
+Provenance: PILOT-ERA. The 2026-05-19 rerun stage of the
+architecture-rank-stability tau-b series (consensus-oracle -> rescored ->
+held-out-gold lineage); reads the rerun consensus scores and adds the
+per-question jackknife. Superseded by the held-out-gold variant. Kept as
+a reproducibility record; not the source of a current paper claim.
 """
 from __future__ import annotations
 

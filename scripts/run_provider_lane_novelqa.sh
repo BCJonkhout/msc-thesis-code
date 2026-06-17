@@ -20,6 +20,13 @@
 # Usage:
 #   bash scripts/run_provider_lane_novelqa.sh <lane_name> <triplets...>
 # Each triplet: "label|provider|model".
+#
+# Provenance (see docs/CODEMAP.md): MAIN-STUDY run lane (NovelQA). Launches one
+# provider's candidates sequentially through the full 4-architecture (flat,
+# naive_rag, raptor, graphrag) NovelQA grid; three lanes run in parallel under
+# the same embedder-load ceiling as the QASPER sibling. NovelQA labels are
+# held-out, so each lane only writes predictions for Codabench submission (no
+# local F1); accuracy is scored later against the official Codabench gold.
 
 LANE_NAME=$1
 shift

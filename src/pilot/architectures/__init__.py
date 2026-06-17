@@ -1,6 +1,10 @@
-"""Pilot answerer architectures.
+"""Answerer architectures for the four-architecture benchmark.
 
-Four architectures are evaluated under unified cost accounting:
+All four architectures are evaluated under unified cost accounting. Only
+``run_flat`` and ``run_naive_rag`` are re-exported from this package
+namespace; ``run_raptor`` and ``run_graphrag`` are imported directly from
+their submodules (``pilot.architectures.raptor`` / ``.graphrag``) because
+they pull in heavier optional dependencies at import time.
 
   - flat       — Flat full-context (document + question to answerer).
   - naive_rag  — Chunk + embed + top-k cosine retrieve + answer.

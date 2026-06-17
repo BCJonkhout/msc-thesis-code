@@ -8,6 +8,12 @@ has all four architectures scored.
 Run from ``code/``::
 
     .venv/Scripts/python.exe scripts/rank_table.py
+
+Provenance: PILOT-ERA reporting. Joins the pilot NovelQA grid cost summary
+with the latest per-candidate QASPER Phase F.1 verdicts into a rank table;
+NovelQA accuracy is left "pending" here because it predates the Codabench
+gold round-trip. Superseded by ``tables_main_study.py``. Kept as a
+reproducibility record; not the source of a current paper claim.
 """
 from __future__ import annotations
 

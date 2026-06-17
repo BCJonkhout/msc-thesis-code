@@ -1,6 +1,6 @@
 """Evaluation metrics: Answer-F1, Evidence-F1, Accuracy, MC parsing.
 
-The pilot evaluates two task formats with three metrics:
+The study evaluates two task formats with three metrics:
 
   - Answer-F1 (QASPER free-form short answers).
     Token-level F1 between predicted and gold answer text after
@@ -12,13 +12,14 @@ The pilot evaluates two task formats with three metrics:
   - Evidence-F1 (QASPER, diagnostic only).
     Sentence-level F1 between the union of retrieved chunks (the
     architecture's evidence selection) and the union of gold
-    `highlighted_evidence` sentences. Reported per pilot plan
-    § 3.4.2 alongside Answer-F1; not used to drive decisions.
+    `highlighted_evidence` sentences. Reported per § 3.4.2 alongside
+    Answer-F1; not used to drive decisions.
 
-  - Accuracy (NovelQA + QuALITY multiple choice).
+  - Accuracy (NovelQA multiple choice).
     1 if `parse_mc_answer(prediction) == gold_label` else 0. The
     parser handles ``"A"``, ``"(A)"``, ``"Option A"``, ``"A. text"``,
-    and full-option-text fallback.
+    and full-option-text fallback. The function is dataset-agnostic
+    and applies to any multiple-choice option-selection task.
 
 These metrics are pure deterministic functions; tests for the
 parser live at ``tests/test_mc_postprocessor.py`` and tests for

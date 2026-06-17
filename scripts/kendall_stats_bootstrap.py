@@ -34,6 +34,12 @@ Citation: \cite{dror2018hitchhiker} for the methodology of significance
 testing in NLP comparisons.
 
 Output: ``outputs/sanity/kendall_stats_20260520.json``
+
+Provenance: PILOT-ERA. Bootstrap CI / permutation test / Monte-Carlo
+power for the cross-dataset tau-b above; together they back the paper's
+``tab:results-tau`` in the pilot-licensing appendix (the documented source
+for that single appendix table) and are otherwise off the canonical
+main-study path. Kept as a reproducibility record.
 """
 from __future__ import annotations
 

@@ -8,6 +8,12 @@ multiple-choice accuracy range; per-architecture centroids are overlaid.
 
 Reads:  code/outputs/sanity/kendall_cross_dataset_under_gold_20260520.json
 Writes: thesis-msc/figures/results/dataset_interaction.{pdf,png}
+
+Provenance (see docs/CODEMAP.md): RETIRED pilot figure renderer. Its output
+depicts the cross-dataset architecture-by-workload "inversion" that the main
+study REFUTED -- flat wins both QASPER and NovelQA, and RAPTOR/GraphRAG were
+dominated. No current thesis-msc/**/*.tex references this figure; the canonical
+result figures come from figures_main_study.py. Kept only for historical record.
 """
 
 from __future__ import annotations

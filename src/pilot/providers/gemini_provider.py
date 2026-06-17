@@ -57,7 +57,7 @@ _RETRY_MAX_S = 32.0
 
 # Per-request timeout (milliseconds). Without it the underlying httpx client
 # has no read timeout, so a single stuck/half-open connection blocks the call
-# forever — and under build concurrency that one hung call freezes the whole
+# forever — and under build concurrency that one hung call stalls the whole
 # build (the executor waits on it indefinitely). With a timeout, a stuck call
 # raises httpx.ReadTimeout/ConnectTimeout, which `_retryable` already treats
 # as retryable → exponential-backoff retry instead of an infinite hang.

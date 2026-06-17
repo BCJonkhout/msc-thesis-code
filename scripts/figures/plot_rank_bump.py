@@ -7,6 +7,12 @@ inversion.
 
 Reads:  code/outputs/sanity/kendall_cross_dataset_under_gold_20260520.json
 Writes: thesis-msc/figures/results/rank_bump.{pdf,png}
+
+Provenance (see docs/CODEMAP.md): RETIRED pilot figure. The cross-dataset
+architecture-rank inversion this chart visualises was REFUTED by the main study
+(flat wins both QASPER and NovelQA; RAPTOR/GraphRAG dominated). No current
+thesis-msc/**/*.tex references it; canonical figures come from
+figures_main_study.py. Kept for history only.
 """
 
 from __future__ import annotations

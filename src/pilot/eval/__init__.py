@@ -1,15 +1,17 @@
-"""Pilot evaluation metrics.
+"""Evaluation metrics for the main study.
 
-The pilot uses three primary answer-quality metrics, one per task
-format (per pilot plan § 3.1 Tasks and § 3.4.2 Judging Method):
+The two live datasets are scored with these answer-quality metrics
+(per § 3.1 Tasks and § 3.4.2 Judging Method):
 
   - Answer-F1:    QASPER free-form short answers vs gold annotations.
   - Evidence-F1:  QASPER paragraph-level evidence retrieval vs gold
                   highlighted_evidence sentences (diagnostic only).
-  - Accuracy:     NovelQA + QuALITY multiple-choice option selection.
+  - Accuracy:     NovelQA multiple-choice option selection (the held-out
+                  gold path is scored against Codabench).
 
 Implementations follow the official QASPER and NovelQA evaluation
-scripts where possible; deviations are documented inline.
+scripts where possible; deviations are documented inline. The accuracy
+metric is also dataset-agnostic for any multiple-choice format.
 """
 from pilot.eval.metrics import (
     accuracy,

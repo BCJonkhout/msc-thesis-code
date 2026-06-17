@@ -15,6 +15,13 @@
 #   bash scripts/run_provider_lane.sh <lane_name> <triplets...>
 #
 # Where each triplet is "label|provider|model".
+#
+# Provenance (see docs/CODEMAP.md): MAIN-STUDY run lane (QASPER). Launches one
+# provider's candidates sequentially through the full 4-architecture (flat,
+# naive_rag, raptor, graphrag) QASPER 20Q sweep; three lanes (Google / xAI /
+# OpenRouter) run in parallel so vendor rate limits do not compound while the
+# embedder load stays bounded. QASPER is scored locally via Answer-F1. Its
+# NovelQA sibling is run_provider_lane_novelqa.sh.
 
 LANE_NAME=$1
 shift

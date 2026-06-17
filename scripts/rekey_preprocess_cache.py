@@ -23,6 +23,13 @@ HEAD without reg_covar. This is sound because reg_covar=1e-4 is a no-op for
 the well-conditioned clusterings that built successfully; the collapse
 cases failed and were never cached, so they rebuild fresh under the new
 HEAD.
+
+Provenance (see docs/CODEMAP.md): MAINTENANCE UTILITY only. It re-keys the
+on-disk preprocess cache (RAPTOR trees / GraphRAG graphs) to a new
+code_version_hash so a build-irrelevant commit does not orphan the cache and
+force expensive Gemini-summary rebuilds. It produces no thesis result -- no
+scored cells, figures, or tables -- and is invoked by hand around a commit, not
+by the canonical main-study pipeline.
 """
 from __future__ import annotations
 

@@ -29,6 +29,13 @@ calibration-only accuracy under gold, and the scoring stdout excerpt.
 
 The script writes after every batch so partial progress survives a
 mid-batch crash.
+
+Provenance (see docs/CODEMAP.md): PILOT-ERA Codabench submission driver. It
+belongs to the pilot's consensus-oracle-vs-gold validation effort on the small
+3-novel / 15-question slice, not to the canonical main-study pipeline. The
+main study scores NovelQA against held-out Codabench gold through the canonical
+scripts (novelqa_codabench_accuracy, build_scored_cells); this driver is kept
+for the historical audit trail of how the gold validation was first obtained.
 """
 from __future__ import annotations
 

@@ -22,6 +22,13 @@
 # crash, work item #3 in pilot Step 7 follow-ups) must not abort the whole
 # sweep. Each candidate is wrapped in a retry-once-on-segfault loop;
 # failures are logged and the sweep continues.
+#
+# Provenance (see docs/CODEMAP.md): PILOT-ERA launcher. This is the
+# multi-candidate Phase-F Pareto sweep that fanned the full 9-candidate slate
+# across the 4 architectures (flat, naive_rag, raptor, graphrag) on QASPER 20Q.
+# The main study fixed the answerer to gemini-3.1-flash-lite-preview, so this
+# multi-candidate sweep is no longer the canonical run path; the per-provider /
+# per-dataset lane launchers drive the main study instead. Kept for history.
 
 LOG_DIR="outputs/sanity"
 mkdir -p "$LOG_DIR"

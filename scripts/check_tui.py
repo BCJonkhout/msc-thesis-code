@@ -6,6 +6,11 @@ success. If your console cannot render it, it falls back to plain text instead
 of crashing.
 
 Run:  .\.venv\Scripts\python.exe scripts\check_tui.py
+
+Provenance (see docs/CODEMAP.md): DEV UTILITY only. It is a self-test for the
+live progress display and produces no result that feeds the thesis -- no scored
+cells, no figures, no tables. It exists purely to verify the TUI renders in a
+given terminal before committing to the multi-day main-study run.
 """
 import sys
 import time

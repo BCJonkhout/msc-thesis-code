@@ -29,6 +29,12 @@ This is a re-implementation of ``novelqa_local_score.py`` that:
 Run from ``code/``::
 
     .venv/Scripts/python.exe scripts/novelqa_local_score_rescored.py
+
+Provenance: PILOT-ERA. The rescored variant of the consensus-oracle
+NovelQA scoring (patched-parser predictions, empty cells excluded);
+SUPERSEDED by held-out Codabench gold (``novelqa_codabench_accuracy.py``),
+which the main study uses instead. Kept as a reproducibility record; not
+the source of a current paper claim.
 """
 from __future__ import annotations
 

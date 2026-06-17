@@ -1,6 +1,18 @@
-# GraphRAG implementation — entry-point notes
+# GraphRAG implementation — design notes (rejected-alternative record)
 
-**Status as of 2026-05-07.** Microsoft `graphrag>=3.0.9` is installed
+> **What shipped vs. what this documents.** The GraphRAG architecture used in the
+> study is a **from-scratch** implementation in
+> [`src/pilot/architectures/graphrag.py`](../src/pilot/architectures/graphrag.py).
+> The notes below describe a *rejected alternative*: building GraphRAG by shimming
+> the Microsoft `graphrag` PyPI package through `graphrag.api`. That route was
+> investigated and not taken — it pulls a heavy dependency and a config surface
+> that is hard to pin deterministically and hard to route through this project's
+> cost ledger. This file is retained as the design-decision record for that
+> choice; it does **not** describe how the shipped code works.
+
+---
+
+**Original planning note (2026-05-07).** Microsoft `graphrag>=3.0.9` is installed
 (see `pyproject.toml`). The implementation shim is the deferred
 Step-3 architecture work; estimated ~1–2 days per the research brief.
 

@@ -17,6 +17,12 @@ Output: ``code/outputs/sanity/qasper_gemini_flash_latest_rescored_20260520.json`
 
 This file is deterministic and re-runnable: given the same predictions
 and the same dev.jsonl gold table, the output is byte-identical.
+
+Provenance: PILOT-ERA QASPER rescore for a single candidate
+(gemini-flash-latest) after the thinking-model token-headroom fix; a
+repair feeding the pilot QASPER rerun gold aggregation. The canonical
+main-study QASPER scoring is on the ``build_scored_cells.py`` path. Kept
+as a reproducibility record; not the source of a current paper claim.
 """
 from __future__ import annotations
 

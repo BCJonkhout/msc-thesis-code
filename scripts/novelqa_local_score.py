@@ -30,6 +30,11 @@ Output:
 Run from ``code/``::
 
     .venv/Scripts/python.exe scripts/novelqa_local_score.py
+
+Provenance: PILOT-ERA. Scores NovelQA against the cross-candidate
+consensus oracle described above; SUPERSEDED by held-out Codabench gold
+(``novelqa_codabench_accuracy.py``), which the main study uses instead.
+Kept as a reproducibility record; not the source of a current paper claim.
 """
 from __future__ import annotations
 

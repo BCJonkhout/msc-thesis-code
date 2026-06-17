@@ -93,7 +93,12 @@ def _row_cost_usd(row: CallRecord, price_card: dict[str, Any]) -> float:
             + row.output_tokens * out
         ) / 1_000_000
 
-    # Local-equivalent path: charge GPU-seconds at the H100 rate.
+    # Local-equivalent path: charge GPU-seconds at the measured local
+    # rate. The main study runs BGE-M3 on the experiment laptop's
+    # RTX 4070, so the billed rate is the consumer-GPU community-cloud
+    # rate matching that device (configs/price_card.yaml#gpu), not an
+    # H100 rate — the measured seconds are 4070 seconds and must be
+    # priced at a 4070-class rate to stay internally consistent.
     gpu_block = price_card.get("gpu") or {}
     # Generic local-GPU rate; fall back to the legacy h100_* keys for
     # back-compat with older price cards.

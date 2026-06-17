@@ -1,18 +1,21 @@
 """Dataset download orchestrator.
 
-Acquires QASPER and QuALITY automatically; emits clear instructions
-for NovelQA which is manually-gated. Idempotent: re-running with
+The two live datasets for the study are QASPER and NovelQA. QASPER is
+acquired automatically; NovelQA is gated and emits clear manual-action
+instructions. QuALITY was scoped out and is no longer a live dataset; its
+downloader is retained as historical scaffolding and is only fetched when
+explicitly requested via ``--dataset quality``. Idempotent: re-running with
 existing files is a no-op unless ``--force`` is set.
 
-Storage layout follows pilot plan § 2:
+Storage layout (§ 2):
 
   code/data/qasper/{train,dev,test}.jsonl
-  code/data/quality/{train,dev}.jsonl
-  code/data/novelqa/{full_texts/, questions.jsonl}   (manual)
+  code/data/novelqa/{full_texts/, questions.jsonl}   (gated)
+  code/data/quality/{train,dev}.jsonl                (retired dataset)
 
 Run as:
 
-  python -m pilot.data.download                 # all datasets
+  python -m pilot.data.download                 # all registered datasets
   python -m pilot.data.download --dataset qasper
 
 Exit codes:
