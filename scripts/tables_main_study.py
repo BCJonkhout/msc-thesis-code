@@ -64,7 +64,7 @@ def quality_table() -> None:
 \caption{{Per-architecture answer quality on the held-out evaluation pools
 ($N=5$ repeats at $T=0$; QASPER ${qn}$ free-form questions over ${qc}$ papers,
 NovelQA ${nn}$ multiple-choice questions over ${nc}$ novels,
-the five calibration novels excluded).
+calibration and held-out novels excluded).
 Cells report the mean with a $95\%$ confidence interval from a paired
 clustered bootstrap ($10{{,}}000$ resamples; clusters are papers for QASPER and
 novels for NovelQA). QASPER is scored with the official Answer-F1 metric;
@@ -99,14 +99,19 @@ def cost_table() -> None:
     body = rf"""\begin{{table}}[ht]
 \centering
 \caption{{Per-architecture deployment cost in USD on the primary answerer
-(\texttt{{gemini-3.1-flash-lite-preview}}), run-index-0 over the full answered grid.
-$C_{{\text{{off}}}}$ is
-the one-time index/build cost; $C_{{\text{{on}}}}$ is the total per-query
-answering cost. ``Deploy'' totals are reported
-under both the standard and the cache-discount price cards; the rightmost column
-is the marginal per-query cost in milli-dollars. Embedding compute is billed at
-the local GPU rate. The cost ranking (Naive RAG $<$ RAPTOR $<$ Flat $<$ GraphRAG)
-is orthogonal to the quality ranking, which is what the Pareto analysis
+(\texttt{{gemini-3.1-flash-lite-preview}}), accounted over the same post-exclusion
+evaluation pool as the quality tables (calibration and held-out novels removed).
+$C_{{\text{{off}}}}$ is the one-time index/build cost; $C_{{\text{{on}}}}$ is the
+total per-query answering cost; the rightmost column is the marginal per-query
+cost in milli-dollars. Gemini calls are priced from the provider rate card and
+embedding compute at the local GPU rate (Appendix~\ref{{app:protocol}}).
+``Deploy'' totals appear under both the standard and the cache-discount card; the
+two coincide for every architecture except Flat, because only Flat re-reads the
+full document and so accrues the cached input tokens the discount applies to---and
+even for Flat the discount touches only cached input, not the uncached first read
+or the output, so its total falls by roughly two-fifths rather than ten-fold. The
+cost ranking (Naive RAG $<$ RAPTOR $<$ Flat $<$ GraphRAG) is orthogonal to the
+quality ranking, which is what the Pareto analysis
 (Figure~\ref{{fig:pareto-cost-quality}}) resolves. Grid totals:
 \${base_tot:.2f} (standard) / \${cache_tot:.2f} (cache-discount).}}\label{{tab:results-cost-quality}}
 \begin{{tabular}}{{lrrrrr}}
@@ -143,10 +148,12 @@ architecture amortizes its per-document build cost $C_{{\text{{off}}}}/\text{{do
 over $N$ queries; $N^\star$ is the questions-per-document density at which its
 amortized cost per query falls below Flat's marginal
 \${flat_q*1000:.2f} per query. Reported under both price cards. Naive RAG is
-cheaper than Flat at any realistic density; RAPTOR and GraphRAG only repay their
-build cost above $N^\star$, beyond the realistic operating density of both
-workloads (QASPER $\approx4$ q/paper, NovelQA $\approx25$ q/novel)---and even
-there they answer no better than Naive RAG.}}\label{{tab:results-breakeven}}
+cheaper than Flat at any density. RAPTOR and GraphRAG repay their build cost only
+above $N^\star$: on the short QASPER workload ($\approx4$ q/paper) neither reaches
+break-even, whereas on the long NovelQA workload ($\approx25$ q/novel) both do
+(RAPTOR well past it, GraphRAG just above). Even where the build cost is recovered,
+they answer no better than Flat and Naive RAG remains cheaper, so break-even never
+converts into a quality or cost-position advantage.}}\label{{tab:results-breakeven}}
 \begin{{tabular}}{{lrrcc}}
 \toprule
  & $C_{{\text{{off}}}}$/doc & $C_{{\text{{on}}}}$/query & $N^\star$ & $N^\star$ \\
@@ -194,28 +201,35 @@ Pair & $\Delta$ mean & 95\% CI of $\Delta$ & Significant \\
 
 
 def memorization_table() -> None:
-    """Closed-book (no-document) control vs flat full-context, both datasets."""
-    q = mem.get("qasper", {})
-    nv_floor, nv_flat = mem["nocontext_accuracy"], mem["flat_accuracy"]
-    qa_floor, qa_flat = q.get("nocontext_answer_f1"), q.get("flat_answer_f1")
-    rows = [
-        f"NovelQA & Accuracy & {nv_floor:.2f} & {nv_flat:.2f} & {nv_flat - nv_floor:+.2f} \\\\",
-        f"QASPER & Answer-F1 & {qa_floor:.2f} & {qa_flat:.2f} & {qa_flat - qa_floor:+.2f} \\\\",
-    ]
+    """Per-architecture quality vs the closed-book floor, both datasets."""
+    nv, qa = mem["novelqa"], mem["qasper"]
+    nv_floor, qa_floor = nv["closed_book"], qa["closed_book"]
+    rows = [f"Closed-book floor & {nv_floor:.2f} & --- & {qa_floor:.2f} & --- \\\\", r"\midrule"]
+    for a in ARCHS:
+        n, q = nv["per_arch"][a], qa["per_arch"][a]
+        rows.append(f"{LABEL[a]} & {n['accuracy']:.2f} & {n['lift']:+.2f} & "
+                    f"{q['answer_f1']:.2f} & {q['lift']:+.2f} \\\\")
+    rows_tex = "\n".join(rows)
     body = rf"""\begin{{table}}[ht]
 \centering
-\caption{{Memorization control: closed-book (question, and options for NovelQA,
-with the document \emph{{withheld}}) versus flat full-context. NovelQA's
-public-domain novels are recalled well above the $0.25$ four-way-MC chance rate,
-so its absolute accuracies are memorization-inflated; QASPER's research papers
-are not recalled (closed-book Answer-F1 near zero), so its scores reflect genuine
-reading. The architecture ranking is identical on both, so the comparison is not
-confounded by memorization even though the NovelQA absolute level is.}}\label{{tab:results-memorization}}
-\begin{{tabular}}{{llccc}}
+\caption{{Memorization control: per-architecture answer quality against the
+closed-book floor (the document \emph{{withheld}}; question, and options for NovelQA).
+NovelQA's public-domain classics are recalled well above the $0.25$ four-way-MC
+chance rate---closed-book accuracy is already {nv_floor:.2f}---so its absolute
+scores are memorization-inflated, whereas QASPER's research papers are not recalled
+(closed-book Answer-F1 {qa_floor:.2f}) and require the document. The reading lift
+(with-document minus closed-book) measures the usable evidence each architecture
+supplies: Flat lifts NovelQA accuracy by ${nv['per_arch']['flat']['lift']:+.2f}$,
+whereas GraphRAG adds almost nothing (${nv['per_arch']['graphrag']['lift']:+.2f}$)
+over closed-book guessing. The architecture ranking is the same with and without
+the memorization caveat, so the comparison is not confounded by memorization
+even though the NovelQA absolute level is.}}\label{{tab:results-memorization}}
+\begin{{tabular}}{{lcccc}}
 \toprule
-Dataset & Metric & Closed-book & Flat (with doc.) & Reading lift \\
+ & \multicolumn{{2}}{{c}}{{NovelQA accuracy}} & \multicolumn{{2}}{{c}}{{QASPER Answer-F1}} \\
+Architecture & with doc. & lift & with doc. & lift \\
 \midrule
-{chr(10).join(rows)}
+{rows_tex}
 \bottomrule
 \end{{tabular}}
 \end{{table}}

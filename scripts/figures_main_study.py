@@ -133,32 +133,38 @@ def fig_accuracy() -> None:
 
 
 def fig_breakeven() -> None:
-    """Amortised deployment cost per query vs questions-per-document (base card)."""
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    """Amortised deployment cost per query vs questions-per-document; both price cards."""
+    fig, ax = plt.subplots(figsize=(7.4, 4.6))
     flat_q = cost["per_arch"]["base|flat"]["c_on_per_query"]
+    flat_q_cache = cost["per_arch"]["cache|flat"]["c_on_per_query"]
     Ns = [n / 2 for n in range(2, 61)]  # 1.0 .. 30.0
-    ax.axhline(flat_q, color=COLOR["flat"], lw=2.0, label=f"Flat (no build): ${flat_q*1000:.2f}m/q")
+    # Flat's per-query cost under each price card (the break-even targets).
+    ax.axhline(flat_q, color=COLOR["flat"], lw=2.0,
+               label=f"Flat, standard card (${flat_q*1000:.2f}m/q)")
+    ax.axhline(flat_q_cache, color=COLOR["flat"], lw=1.6, ls="--",
+               label=f"Flat, cache card (${flat_q_cache*1000:.2f}m/q)")
     for a in ("naive_rag", "raptor", "graphrag"):
         b = brk[f"base|{a}"]
         coff_doc, onq, nstar = b["c_off_per_doc"], b["c_on_per_query"], b["n_star"]
         ys = [coff_doc / n + onq for n in Ns]
         ax.plot(Ns, ys, color=COLOR[a], lw=2.0, label=LABEL[a])
-        if nstar and 1 <= nstar <= 30:
+        if nstar and 1 <= nstar <= 30:  # standard-card crossing
             yat = coff_doc / nstar + onq
             ax.plot([nstar], [yat], "o", color=COLOR[a], markersize=7, zorder=5)
             ax.annotate(f"$N^*\\approx{nstar:.1f}$", (nstar, yat), fontsize=8.6,
                         color=COLOR[a], xytext=(6, 6), textcoords="offset points")
-    # real operating densities
-    for x, txt in ((4, "QASPER ≈ 4 q/paper"), (25, "NovelQA ≈ 25 q/novel")):
-        ax.axvline(x, color="0.6", ls=":", lw=1.0)
-        ax.text(x, ax.get_ylim()[1], txt, rotation=90, va="top", ha="right",
-                fontsize=7.6, color="0.4")
     ax.set_yscale("log")
+    ax.set_xlim(1, 30)
+    ymin, ymax = ax.get_ylim()
+    # real operating densities (labels at the top; the legend now sits outside the axes)
+    for x, txt in ((4, "QASPER $\\approx$ 4 q/paper"), (25, "NovelQA $\\approx$ 25 q/novel")):
+        ax.axvline(x, color="0.6", ls=":", lw=1.0)
+        ax.text(x - 0.4, ymax * 0.9, txt, rotation=90, va="top", ha="right",
+                fontsize=7.6, color="0.4")
     ax.set_xlabel("Questions per document $N$ (build cost amortised over $N$ queries)")
     ax.set_ylabel("Amortised deployment cost per query (USD, log scale)")
-    ax.set_xlim(1, 30)
-    ax.set_title("Break-even vs Flat: structure pays only above $N^*$ queries per document", fontsize=10.5)
-    ax.legend(loc="upper right", fontsize=8.8)
+    ax.set_title("Break-even vs Flat: structured builds pay back only at high $N$", fontsize=10.5)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8.4, borderaxespad=0.0)
     fig.tight_layout()
     _save(fig, "breakeven_curves")
 

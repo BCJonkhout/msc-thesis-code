@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +44,15 @@ def _project_data_root() -> Path:
 
 def _norm_title(title: str) -> str:
     """Codabench's per-novel keys in scoring_stdout are
-    lowercase-no-punctuation versions of the human title."""
-    return re.sub(r"[^a-z0-9]", "", title.lower())
+    lowercase-no-punctuation versions of the human title.
+
+    Accents are transliterated to ASCII (NFKD + drop combining marks) rather than
+    deleted, so an accented source title matches Codabench's key: e.g. Codabench
+    emits ``lesmiserables`` for "Les Misérables", whereas naive stripping of
+    non-``[a-z0-9]`` would delete the ``é`` and yield ``lesmisrables`` (no
+    match). The platform itself transliterates, so we mirror that here."""
+    ascii_title = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]", "", ascii_title.lower())
 
 
 def _question_order_per_novel(data_root: Path) -> dict[str, list[str]]:

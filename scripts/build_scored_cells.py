@@ -67,10 +67,12 @@ def main() -> int:
     def correct_for(sub_id: int) -> dict[tuple[str, str], int]:
         if sub_id in _cache:
             return _cache[sub_id]
-        strings = fetch_correctness_strings(sub_id)  # {norm_title: "TFTF..."}
+        strings = fetch_correctness_strings(sub_id)  # {codabench_key: "TFTF..."}
         out: dict[tuple[str, str], int] = {}
         for norm, s in strings.items():
-            nid = norm2nid.get(norm)
+            # normalise the Codabench key through the same transliterating
+            # _norm_title as norm2nid, so accented titles join (Les Mis\'erables).
+            nid = norm2nid.get(_norm_title(norm))
             if not nid:
                 continue
             qids = qorder.get(nid, [])
@@ -92,6 +94,14 @@ def main() -> int:
     print(f"  (disambiguated by acc: {amb_acc} -> naive_rag={hi}, raptor={lo})")
 
     nov = {a: correct_for(sid) for a, sid in sub.items()}
+
+    # Surface any of our novels (outside the calibration hold-out) that got NO
+    # recoverable Codabench gold, so the exclusion is explicit, not silent.
+    matched = {nid for c in nov.values() for (nid, _qid) in c}
+    no_gold = sorted(n for n in nids if n not in EXCLUDE and n not in matched)
+    if no_gold:
+        print(f"WARNING: no Codabench gold recovered for non-calibration novels {no_gold} "
+              f"(answered but unscorable; excluded from the eval pool).")
 
     # QASPER per-(paper,qid)-arch F1 over repeats
     qasper: dict[tuple[str, str], dict[str, dict[int, float]]] = defaultdict(lambda: defaultdict(dict))

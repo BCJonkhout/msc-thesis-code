@@ -58,8 +58,11 @@ JSON_PATH = OUT_DIR / "significance.json"
 TEX_PATH = OUT_DIR / "significance_table.tex"
 
 # Expected point estimates used as a guard rail (QASPER mean F1 / NovelQA acc).
-# NovelQA values are over the held-out test pool (5 calibration novels excluded
-# per data/novelqa/calibration_novels.json: exclude_from_main_eval).
+# NovelQA values are over the held-out test pool (55 novels): the 4 calibration
+# novels are excluded per data/novelqa/calibration_novels.json, the 2.5M-token
+# outlier B48 is never built, and Frankenstein (B30) is dropped for lack of
+# recoverable Codabench gold. Les Mis\'erables (B42) is included after the
+# accent-aware title-join fix (extract_score._norm_title).
 EXPECTED = {
     "qasper": {
         "flat": 0.4573,
@@ -68,10 +71,10 @@ EXPECTED = {
         "graphrag": 0.4025,
     },
     "novelqa": {
-        "flat": 0.7760,
-        "naive_rag": 0.6699,
-        "raptor": 0.6617,
-        "graphrag": 0.6142,
+        "flat": 0.7574,
+        "naive_rag": 0.6539,
+        "raptor": 0.6459,
+        "graphrag": 0.5996,
     },
 }
 
