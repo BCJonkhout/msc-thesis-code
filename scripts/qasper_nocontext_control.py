@@ -7,12 +7,15 @@ rather than assert it is to run the same closed-book control on QASPER and repor
 the floor. Unlike NovelQA, QASPER gold is local, so Answer-F1 is scored here with
 the official multi-reference token-F1 metric -- no Codabench round-trip.
 
-Held identical to the flat full-context QASPER run except the context is empty:
+Held identical to the flat full-context QASPER run (item set, answerer, T=0, and
+scoring) except that the answerer is prompted closed-book, with no document:
 
   - Item set: ``load_qasper_full`` (calibration QIDs excluded, >=2 q/paper) ->
     the exact 955 questions over 249 papers the main study scored.
-  - Prompt: ``qa_freeform_literature`` (no-abstention free-form template),
-    rendered through the same ``_render_prompt`` path as flat, with ``context=""``.
+  - Prompt: a dedicated closed-book template that states the paper is unavailable
+    and forces a parametric-knowledge best guess. Reusing the shared
+    context-template with an empty context instead makes the answerer ask for the
+    missing context rather than guessing, which measures refusal, not recall.
   - Answerer: ``gemini-3.1-flash-lite-preview`` at T=0, max_tokens 256 -- the
     main-study single answerer, same provider adapter.
   - Scoring: ``answer_f1_against_references`` against the local gold answers,
@@ -38,7 +41,6 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
-from pilot.architectures.base import _render_prompt
 from pilot.cli.step_3_dry_run import load_qasper_full
 from pilot.env import load_env
 from pilot.eval.metrics import answer_f1_against_references
@@ -47,9 +49,23 @@ from pilot.providers.factory import get_provider
 
 _ANSWERER_MODEL = "gemini-3.1-flash-lite-preview"
 _ANSWERER_PROVIDER = "gemini"
-_PROMPT_STYLE = "literature"
 _TEMPERATURE = 0.0
 _MAX_TOKENS = 256
+
+# Closed-book probe: the answerer has no document, so the shared context-template
+# ("answer based on the provided context") makes it ask for the missing context
+# instead of guessing. This dedicated prompt forces a parametric-knowledge best
+# guess and keeps the answer format comparable to the with-document run, so the
+# Answer-F1 comparison stays apples-to-apples.
+_CLOSED_BOOK_PREFIX = (
+    "You are answering a question about a specific research paper that you do not "
+    "have in front of you.\n"
+    "Answer from your own knowledge with your single best guess.\n"
+    "Be concise and specific; for yes/no questions reply with one word.\n"
+    "Do not ask for the paper and do not say you lack context. Always commit to a "
+    "direct best-guess answer.\n\n"
+    "Question: "
+)
 
 _DATA_ROOT = _REPO / "data"
 _OUT_DIR = _REPO / "outputs" / "main_study"
@@ -78,12 +94,7 @@ def _load_done(path: Path) -> dict[tuple[str, str], float]:
 
 
 def _answer_one(provider, item: dict) -> dict:
-    prompt = _render_prompt(
-        context="",  # closed-book
-        query=item["question"],
-        options=None,  # free-form -> qa_freeform_literature
-        prompt_style=_PROMPT_STYLE,
-    )
+    prompt = _CLOSED_BOOK_PREFIX + item["question"] + "\n\nAnswer:"
     result = provider.call(
         prompt,
         model=_ANSWERER_MODEL,

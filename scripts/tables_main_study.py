@@ -204,11 +204,11 @@ def memorization_table() -> None:
     """Per-architecture quality vs the closed-book floor, both datasets."""
     nv, qa = mem["novelqa"], mem["qasper"]
     nv_floor, qa_floor = nv["closed_book"], qa["closed_book"]
-    rows = [f"Closed-book floor & {nv_floor:.2f} & --- & {qa_floor:.2f} & --- \\\\", r"\midrule"]
+    rows = [f"Closed-book floor & {qa_floor:.2f} & --- & {nv_floor:.2f} & --- \\\\", r"\midrule"]
     for a in ARCHS:
         n, q = nv["per_arch"][a], qa["per_arch"][a]
-        rows.append(f"{LABEL[a]} & {n['accuracy']:.2f} & {n['lift']:+.2f} & "
-                    f"{q['answer_f1']:.2f} & {q['lift']:+.2f} \\\\")
+        rows.append(f"{LABEL[a]} & {q['answer_f1']:.2f} & {q['lift']:+.2f} & "
+                    f"{n['accuracy']:.2f} & {n['lift']:+.2f} \\\\")
     rows_tex = "\n".join(rows)
     body = rf"""\begin{{table}}[ht]
 \centering
@@ -226,7 +226,7 @@ the memorization caveat, so the comparison is not confounded by memorization
 even though the NovelQA absolute level is.}}\label{{tab:results-memorization}}
 \begin{{tabular}}{{lcccc}}
 \toprule
- & \multicolumn{{2}}{{c}}{{NovelQA accuracy}} & \multicolumn{{2}}{{c}}{{QASPER Answer-F1}} \\
+ & \multicolumn{{2}}{{c}}{{QASPER Answer-F1}} & \multicolumn{{2}}{{c}}{{NovelQA accuracy}} \\
 Architecture & with doc. & lift & with doc. & lift \\
 \midrule
 {rows_tex}
@@ -239,7 +239,7 @@ Architecture & with doc. & lift & with doc. & lift \\
 
 def copy_figures() -> None:
     src = MS / "figures"
-    for stem in ("pareto_cost_quality", "accuracy_by_arch", "breakeven_curves"):
+    for stem in ("pareto_cost_quality", "accuracy_by_arch", "breakeven_curves", "memorization_floor"):
         for ext in ("pdf", "png"):
             s = src / f"{stem}.{ext}"
             if s.exists():
