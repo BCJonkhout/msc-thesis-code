@@ -170,25 +170,27 @@ Architecture & (m\$) & (m\$) & std & cache \\
 def significance_table() -> None:
     def block(ds_key: str, ds_name: str) -> str:
         pw = sig["datasets"][ds_key]["pairwise"]
-        out = [f"\\multicolumn{{4}}{{l}}{{\\textit{{{ds_name}}}}} \\\\"]
+        out = [f"\\multicolumn{{5}}{{l}}{{\\textit{{{ds_name}}}}} \\\\"]
         for p in pw:
             star = "yes" if p["significant"] else "no"
+            pv = p["p_value"]
+            p_str = "$<0.001$" if pv < 0.001 else f"{pv:.3f}"
             out.append(
                 f"{LABEL[p['a']]} vs {LABEL[p['b']]} & {p['mean_diff']:+.3f} & "
-                f"[{p['ci_low']:+.3f}, {p['ci_high']:+.3f}] & {star} \\\\")
+                f"[{p['ci_low']:+.3f}, {p['ci_high']:+.3f}] & {p_str} & {star} \\\\")
         return "\n".join(out)
     nr = next(p for p in sig["datasets"]["novelqa"]["pairwise"]
               if {p["a"], p["b"]} == {"naive_rag", "raptor"})
     body = rf"""\begin{{table}}[ht]
 \centering
 \caption{{Paired clustered-bootstrap significance ($10{{,}}000$ resamples,
-percentile $95\%$ CI on the mean difference; clusters are papers for QASPER and
+percentile $95\%$ CI on the mean difference and the two-sided bootstrap $p$-value ($p<0.05$ counts as significant); clusters are papers for QASPER and
 novels for NovelQA). Every QASPER pair is significant. On NovelQA every pair is
 significant except Naive RAG versus RAPTOR (${nr['mean_diff']:+.3f}$, CI straddles zero),
 which are statistically tied.}}\label{{tab:results-significance}}
-\begin{{tabular}}{{lrcc}}
+\begin{{tabular}}{{lrccc}}
 \toprule
-Pair & $\Delta$ mean & 95\% CI of $\Delta$ & Significant \\
+Pair & $\Delta$ mean & 95\% CI of $\Delta$ & $p$ & Significant \\
 \midrule
 {block("qasper", "QASPER (Answer-F1)")}
 \midrule
