@@ -7,6 +7,7 @@ Outputs into code/outputs/main_study/export/ (the staging dir promoted to
 thesis-msc/generated/ by make export-assets):
   mainstudy_quality_ci.tex   -> tab:results-arch-mean   (per-arch quality + 95% CI)
   mainstudy_cost.tex         -> tab:results-cost-quality (deployment cost, both cards)
+  mainstudy_cost_decomposition.tex -> tab:results-cost-decomp (build/answer x LLM/embed)
   mainstudy_breakeven.tex    -> tab:results-breakeven    (break-even N* per doc)
   mainstudy_significance.tex -> tab:results-significance (paired clustered bootstrap)
 The three figure PDFs/PNGs are also copied in with stable paper names.
@@ -105,19 +106,21 @@ $C_{{\text{{off}}}}$ is the one-time index/build cost; $C_{{\text{{on}}}}$ is th
 total per-query answering cost; the rightmost column is the marginal per-query
 cost in milli-dollars (m\$), where one milli-dollar is $10^{{-3}}$~USD. Gemini calls are priced from the provider rate card and
 embedding compute at the local GPU rate (Appendix~\ref{{app:protocol}}).
-``Deploy'' totals appear under both the standard and the cache-discount card; the
-two coincide for every architecture except Flat, because only Flat re-reads the
-full document and so accrues the cached input tokens the discount applies to---and
-even for Flat the discount touches only cached input, not the uncached first read
-or the output, so its total falls by roughly two-fifths rather than ten-fold. The
+Both deployment columns are cache-aware---repeated reads are billed at a cached
+rate in both---and differ only in that rate: Gemini's published one-quarter of the
+uncached price (std-cache) versus a more aggressive one-tenth (deep-cache). The two
+coincide for every architecture except Flat, because only Flat re-reads the full
+document and so accrues cached input at all; even for Flat the deeper discount
+touches only cached input, not the uncached first read or the output, so its total
+falls by roughly two-fifths rather than ten-fold. The
 cost ranking (Naive RAG $<$ RAPTOR $<$ Flat $<$ GraphRAG) is orthogonal to the
 quality ranking, which is what the Pareto analysis
 (Figure~\ref{{fig:pareto-cost-quality}}) resolves. Grid totals:
-\${base_tot:.2f} (standard) / \${cache_tot:.2f} (cache-discount).}}\label{{tab:results-cost-quality}}
+\${base_tot:.2f} (std-cache) / \${cache_tot:.2f} (deep-cache).}}\label{{tab:results-cost-quality}}
 \begin{{tabular}}{{lrrrrr}}
 \toprule
  & $C_{{\text{{off}}}}$ & $C_{{\text{{on}}}}$ & Deploy & Deploy & $C_{{\text{{on}}}}$/query \\
-Architecture & (USD) & (USD) & std (USD) & cache (USD) & (m\$) \\
+Architecture & (USD) & (USD) & std-cache (USD) & deep-cache (USD) & (m\$) \\
 \midrule
 {rows_tex}
 \bottomrule
@@ -125,6 +128,58 @@ Architecture & (USD) & (USD) & std (USD) & cache (USD) & (m\$) \\
 \end{{table}}
 """
     write("mainstudy_cost.tex", body)
+
+
+def cost_decomposition_table() -> None:
+    # Where each architecture's deployment dollars actually go: the one-time build
+    # vs the per-query answering, each split into LLM API calls and local bge-m3
+    # embedding. Standard card, same post-exclusion pool as cost_table. Driven
+    # from cost_per_arch.json -- no hardcoded metrics.
+    order = sorted(ARCHS, key=lambda a: PC[f"base|{a}"]["total"])
+    rows = []
+    for a in order:
+        b = PC[f"base|{a}"]
+        rows.append(
+            f"{LABEL[a]} & {b['gemini_off']:.2f} & {b['embed_off']:.2f} & "
+            f"{b['gemini_on']:.2f} & {b['embed_on']:.2f} & {b['total']:.2f} & "
+            f"{b['c_store_total']:.3f} \\\\")
+    rows_tex = "\n".join(rows)
+    gr, rp = PC["base|graphrag"], PC["base|raptor"]
+    f_base, f_cache = PC["base|flat"]["total"], PC["cache|flat"]["total"]
+    # Deep-cache prices cached input at 0.1x uncached vs the standard card's 0.25x
+    # (a 0.4x factor), so the standard->deep saving is 0.6x of the cached re-read
+    # cost; invert it to recover the cached re-reads under the standard card and
+    # the undiscounted remainder (uncached first read + output).
+    cached_base = (f_base - f_cache) / 0.6
+    other = f_base - cached_base
+    body = rf"""\begin{{table}}[ht]
+\centering
+\caption{{Where each architecture's deployment dollars go, on the standard card and
+the same post-exclusion pool as Table~\ref{{tab:results-cost-quality}}: the one-time
+build ($C_{{\text{{off}}}}$) and the per-query answering ($C_{{\text{{on}}}}$), each split
+into LLM API calls and local \texttt{{bge-m3}} embedding. Persistent-artifact storage
+($C_{{\text{{store}}}}$) is shown separately---it folds into the study-wide amortized
+cost, not the deployment total. All values in USD. Build cost is dominated by LLM
+calls: GraphRAG's entity and community extraction (\${gr['gemini_off']:.2f}) and
+RAPTOR's tree summarization (\${rp['gemini_off']:.2f}); embedding is a minor line
+except RAPTOR's per-node tree vectors (\${rp['embed_off']:.2f}). Flat carries no
+build and no embedding---its \${f_base:.2f} is entirely answering API, of which about
+\${cached_base:.2f} is the cached re-reads the deep-cache card reprices and
+\${other:.2f} is the uncached first read of each document plus all output, which no
+cache discount touches.}}\label{{tab:results-cost-decomp}}
+\begin{{tabular}}{{lrrrrrr}}
+\toprule
+ & \multicolumn{{2}}{{c}}{{Build ($C_{{\text{{off}}}}$)}} & \multicolumn{{2}}{{c}}{{Answer ($C_{{\text{{on}}}}$)}} & & \\
+\cmidrule(lr){{2-3}}\cmidrule(lr){{4-5}}
+Architecture & LLM & embed & LLM & embed & Deploy & Storage \\
+ & (USD) & (USD) & (USD) & (USD) & (USD) & (USD) \\
+\midrule
+{rows_tex}
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+"""
+    write("mainstudy_cost_decomposition.tex", body)
 
 
 def breakeven_table() -> None:
@@ -253,6 +308,7 @@ def main() -> int:
     print(f"tables + figures -> {EXPORT}")
     quality_table()
     cost_table()
+    cost_decomposition_table()
     breakeven_table()
     significance_table()
     memorization_table()
