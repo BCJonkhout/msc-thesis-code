@@ -103,7 +103,7 @@ def cost_table() -> None:
 evaluation pool as the quality tables (calibration and held-out novels removed).
 $C_{{\text{{off}}}}$ is the one-time index/build cost; $C_{{\text{{on}}}}$ is the
 total per-query answering cost; the rightmost column is the marginal per-query
-cost in milli-dollars. Gemini calls are priced from the provider rate card and
+cost in milli-dollars (m\$), where one milli-dollar is $10^{{-3}}$~USD. Gemini calls are priced from the provider rate card and
 embedding compute at the local GPU rate (Appendix~\ref{{app:protocol}}).
 ``Deploy'' totals appear under both the standard and the cache-discount card; the
 two coincide for every architecture except Flat, because only Flat re-reads the
