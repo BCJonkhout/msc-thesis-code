@@ -296,7 +296,7 @@ Architecture & with doc. & lift & with doc. & lift \\
 
 def copy_figures() -> None:
     src = MS / "figures"
-    for stem in ("pareto_cost_quality", "accuracy_by_arch", "breakeven_curves", "memorization_floor"):
+    for stem in ("pareto_cost_quality", "accuracy_by_arch", "breakeven_curves", "memorization_floor", "cost_composition"):
         for ext in ("pdf", "png"):
             s = src / f"{stem}.{ext}"
             if s.exists():

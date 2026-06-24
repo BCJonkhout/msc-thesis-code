@@ -52,6 +52,14 @@ OUT.mkdir(parents=True, exist_ok=True)
 EMBED_FIXED_S_PER_CALL = 0.17121772848101266
 EMBED_MARGINAL_S_PER_CHAR = 3.46486075949368e-06
 
+# gemini-3.1-flash-lite-preview answering rates, USD per token (price_card.yaml,
+# provider:ai.google.dev 2026-04). Used only to split the already-priced answering
+# cost into its uncached / cached / output components for the cost-composition
+# figure; the cached rate is the only one that differs between the two cards.
+GEM_UNCACHED_USD_PER_TOK = 0.10e-6
+GEM_OUTPUT_USD_PER_TOK = 0.40e-6
+GEM_CACHED_USD_PER_TOK = {"base": 0.025e-6, "cache": 0.01e-6}
+
 # Main-study preprocess-cache config signatures (to pick the right variant dir
 # when a document was also built under a different pilot config).
 MAIN_CONFIG = {
@@ -153,6 +161,7 @@ def main() -> int:
     # ── Walk the ledger once, attributing every run-index-0 row to a document ──
     gem = {"base": defaultdict(float), "cache": defaultdict(float)}  # (arch, off|on) -> usd, included only
     emb = defaultdict(lambda: [0, 0])  # (arch, off|on) -> [calls, chars], included only
+    gen_tok = defaultdict(lambda: [0, 0, 0])  # arch -> [uncached, cached, output] answer tokens (included, run0)
     billed_gem = 0.0  # all gemini rows, all repeats, full grid (billing reconciliation)
     doc_tokens = defaultdict(int)  # included doc id -> full-context tokens (flat first-query uncached)
     genptr = Counter()
@@ -191,6 +200,9 @@ def main() -> int:
                 if r is not None:
                     gem["base"][(a, "on")] += _row_cost_usd(r, pc_base)
                     gem["cache"][(a, "on")] += _row_cost_usd(r, pc_cache)
+                    gen_tok[a][0] += o.get("uncached_input_tokens", 0) or 0
+                    gen_tok[a][1] += o.get("cached_input_tokens", 0) or 0
+                    gen_tok[a][2] += o.get("output_tokens", 0) or 0
             if a == "flat" and inc:
                 doc_tokens[pid] = max(doc_tokens[pid], o.get("uncached_input_tokens", 0) or 0)
         elif st == "preprocess":
@@ -225,11 +237,19 @@ def main() -> int:
             g_off, g_on = gem[card][(a, "off")], gem[card][(a, "on")]
             e_off, e_on = embed_usd(a, "off"), embed_usd(a, "on")
             c_off, c_on = g_off + e_off, g_on + e_on
+            # split the answering LLM cost into its ledger components (so the
+            # cost-composition figure can show which counters each method lights)
+            u, cc, ot = gen_tok[a]
+            on_unc = u * GEM_UNCACHED_USD_PER_TOK
+            on_cac = cc * GEM_CACHED_USD_PER_TOK[card]
+            on_out = ot * GEM_OUTPUT_USD_PER_TOK
             per_arch[(card, a)] = {
                 "c_off_total": round(c_off, 4), "c_on_total": round(c_on, 4),
                 "total": round(c_off + c_on, 4),
                 "gemini_off": round(g_off, 4), "embed_off": round(e_off, 4),
                 "gemini_on": round(g_on, 4), "embed_on": round(e_on, 4),
+                "c_on_uncached": round(on_unc, 4), "c_on_cached": round(on_cac, 4),
+                "c_on_output": round(on_out, 4),
                 "c_on_per_query": round(c_on / N_Q, 6),
                 "c_store_total": round(c_store[a], 6),
                 # study-wide amortized cost per query (build + storage + online) / N_Q
