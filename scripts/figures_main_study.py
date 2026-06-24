@@ -239,9 +239,9 @@ def fig_cost_composition() -> None:
         axB.text(i, tot, f"${tot:.2f}", ha="center", va="bottom", fontsize=8.2)
     axB.set_xticks(x); axB.set_xticklabels(xl, fontsize=9)
     axB.set_ylabel(r"One-time build cost $C_{\mathrm{off}}$ (USD)")
-    axB.set_title("(a) Build: one-time dollars, almost all LLM calls", fontsize=9.4)
+    axB.set_title("(a) Build: one-time dollars, almost all LLM calls", fontsize=9.4, pad=8)
     axB.legend(fontsize=7.4, loc="upper left")
-    axB.margins(y=0.18)
+    axB.set_ylim(0, max(PCB[f"base|{a}"]["c_off_total"] for a in ARCHS) * 1.22)
 
     # (b) per-query answering cost, milli-USD, stacked by ledger source
     perq_src = [("uncached input (cold read)", "c_on_uncached", "#0072B2"),
@@ -259,9 +259,9 @@ def fig_cost_composition() -> None:
         axQ.text(i, tot, f"{tot:.2f}", ha="center", va="bottom", fontsize=8.2)
     axQ.set_xticks(x); axQ.set_xticklabels(xl, fontsize=9)
     axQ.set_ylabel(r"Per-query answering cost $C_{\mathrm{on}}$ (milli-USD)")
-    axQ.set_title("(b) Per query: only Flat lights the cached counter", fontsize=9.4)
+    axQ.set_title("(b) Per query: only Flat lights the cached counter", fontsize=9.4, pad=8)
     axQ.legend(fontsize=7.4, loc="upper right")
-    axQ.margins(y=0.18)
+    axQ.set_ylim(0, max(PCB[f"base|{a}"]["c_on_per_query"] for a in ARCHS) * 1000 * 1.27)
 
     fig.suptitle("Where each architecture's cost comes from (standard card): "
                  "structured methods pay to build, Flat pays to re-read",
