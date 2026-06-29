@@ -129,7 +129,7 @@ def fig_accuracy() -> None:
         ax.set_title(DS_SHORT[ds], fontsize=10)
         top = max(QUAL[ds][a][2] for a in ARCHS)
         ax.set_ylim(0, top * 1.16)
-    fig.suptitle("Per-architecture quality with 95% clustered-bootstrap CIs (identical ranking on both datasets)",
+    fig.suptitle("Per-architecture mean quality with 95% clustered-bootstrap confidence intervals",
                  fontsize=10.5, y=1.01)
     fig.tight_layout()
     _save(fig, "accuracy_by_arch")
