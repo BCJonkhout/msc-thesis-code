@@ -331,6 +331,55 @@ def macros() -> None:
     write("mainstudy_macros.tex", "\n".join(m) + "\n")
 
 
+def tau_table() -> None:
+    """Pilot rank-stability distribution table (tab:results-tau), generated from the
+    under-gold cross-dataset pairwise blocks and the permutation-test stats, so the lone
+    remaining hand-typed results table joins the generated-asset pipeline."""
+    SAN = ROOT / "outputs" / "sanity"
+    cd = json.loads((SAN / "kendall_cross_dataset_under_gold_20260520.json").read_text(encoding="utf-8"))
+    ks = json.loads((SAN / "kendall_stats_20260520.json").read_text(encoding="utf-8"))["results"]
+
+    def sci(p: float) -> str:
+        from math import log10, floor
+        e = floor(log10(p))
+        m = round(p / 10 ** e)
+        return f"\\({m}\\!\\times\\!10^{{{e}}}\\)"
+
+    def col(view: str) -> dict:
+        taus = [p["tau"] for p in cd["blocks"][f"{view}_only"]["pairs"]]
+        n = len(taus)
+        return dict(mean=cd["blocks"][f"{view}_only"]["mean_tau"],
+                    perfect=sum(1 for t in taus if t >= 0.999),
+                    le0=sum(1 for t in taus if t <= 0), n=n,
+                    p=sci(ks[view]["permutation_test"]["p_value_one_sided"]))
+
+    nv, qa = col("novelqa"), col("qasper")
+    body = rf"""\begin{{table}}[h]
+\centering
+\begin{{tabular}}{{lrr}}
+\toprule
+Statistic & NovelQA & QASPER \\
+\midrule
+Median pairwise \(\tau_b\)               & \(2/3\) & \(2/3\) \\
+Mean pairwise \(\tau_b\)                 & {nv['mean']:.3f} & {qa['mean']:.3f} \\
+Permutation \(p\) value (one-sided)      & {nv['p']} & {qa['p']} \\
+Pairs with perfect agreement \(\tau_b = 1\) & {nv['perfect']} / {nv['n']} & {qa['perfect']} / {qa['n']} \\
+Pairs with \(\tau_b \leq 0\) (rank-disagreement) & {nv['le0']} / {nv['n']} & {qa['le0']} / {qa['n']} \\
+\bottomrule
+\end{{tabular}}
+\caption{{Distribution of pairwise Kendall \(\tau_b\) across the {nv['n']} pilot
+candidate-pairs on each dataset under gold scoring.
+Statistics use 10{{,}}000 bootstrap resamples and permutation shuffles
+with add-one smoothing~\cite{{dror2018hitchhiker}}.
+The within-dataset medians justified the single-answerer main study;
+they are a pilot diagnostic, superseded by the main study's clustered
+bootstrap (Table~\ref{{tab:results-arch-mean}}).}}
+\label{{tab:results-tau}}
+\end{{table}}
+"""
+    write("mainstudy_tau.tex", body)
+
+
 def copy_figures() -> None:
     src = MS / "figures"
     for stem in ("pareto_cost_quality", "accuracy_by_arch", "breakeven_curves", "memorization_floor", "cost_composition"):
@@ -349,6 +398,7 @@ def main() -> int:
     breakeven_table()
     significance_table()
     memorization_table()
+    tau_table()
     macros()
     copy_figures()
     print(f"\nmemorization floor (for prose, not a table): nocontext "
