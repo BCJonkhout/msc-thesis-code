@@ -202,7 +202,7 @@ def breakeven_table() -> None:
 architecture amortizes its per-document build cost $C_{{\text{{off}}}}/\text{{doc}}$
 over $N$ queries; $N^\star$ is the questions-per-document density at which its
 amortized cost per query falls below Flat's marginal
-\${flat_q*1000:.2f} per query. Reported under both price cards. Naive RAG is
+{flat_q*1000:.2f}~m\$ per query. Reported under both price cards. Naive RAG is
 cheaper than Flat at any density. RAPTOR and GraphRAG repay their build cost only
 above $N^\star$: on the short QASPER workload ($\approx4$ q/paper) neither reaches
 break-even, whereas on the long NovelQA workload ($\approx25$ q/novel) both do
@@ -294,6 +294,42 @@ Architecture & with doc. & lift & with doc. & lift \\
     write("mainstudy_memorization.tex", body)
 
 
+def macros() -> None:
+    """Inline result numbers as \\input-able \\newcommand macros, so values can stay in
+    the prose while still living in exactly one regenerated place (no hand-typed metrics).
+    Driven from the same JSONs as the tables. LaTeX control sequences are letters-only,
+    so e.g. Answer-F1 -> \\qFlatFone."""
+    def fp(ds: str, a: str, b: str) -> dict:
+        return next(p for p in sig["datasets"][ds]["pairwise"]
+                    if {p["a"], p["b"]} == {a, b})
+    fn = fp("qasper", "flat", "naive_rag")
+    nr = fp("novelqa", "naive_rag", "raptor")
+    m = [
+        f"\\newcommand{{\\qFlatFone}}{{{QA['flat']['mean']:.3f}}}",
+        f"\\newcommand{{\\qNaiveFone}}{{{QA['naive_rag']['mean']:.3f}}}",
+        f"\\newcommand{{\\qRaptorFone}}{{{QA['raptor']['mean']:.3f}}}",
+        f"\\newcommand{{\\qGraphFone}}{{{QA['graphrag']['mean']:.3f}}}",
+        f"\\newcommand{{\\nFlatAcc}}{{{NV['flat']['mean']:.3f}}}",
+        f"\\newcommand{{\\nNaiveAcc}}{{{NV['naive_rag']['mean']:.3f}}}",
+        f"\\newcommand{{\\nRaptorAcc}}{{{NV['raptor']['mean']:.3f}}}",
+        f"\\newcommand{{\\nGraphAcc}}{{{NV['graphrag']['mean']:.3f}}}",
+        f"\\newcommand{{\\deltaFlatNaiveQ}}{{{fn['mean_diff']:.3f}}}",
+        f"\\newcommand{{\\pFlatNaiveQ}}{{{fn['p_value']:.3f}}}",
+        f"\\newcommand{{\\deltaNaiveRaptorN}}{{{nr['mean_diff']:.3f}}}",
+        f"\\newcommand{{\\costNaive}}{{{PC['base|naive_rag']['total']:.2f}}}",
+        f"\\newcommand{{\\costRaptor}}{{{PC['base|raptor']['total']:.2f}}}",
+        f"\\newcommand{{\\costFlat}}{{{PC['base|flat']['total']:.2f}}}",
+        f"\\newcommand{{\\costGraph}}{{{PC['base|graphrag']['total']:.2f}}}",
+        f"\\newcommand{{\\nstarRaptor}}{{{round(brk['base|raptor']['n_star'])}}}",
+        f"\\newcommand{{\\nstarGraph}}{{{round(brk['base|graphrag']['n_star'])}}}",
+        f"\\newcommand{{\\memQasperFloor}}{{{mem['qasper']['closed_book']:.2f}}}",
+        f"\\newcommand{{\\memNovelFloor}}{{{mem['novelqa']['closed_book']:.2f}}}",
+        f"\\newcommand{{\\memFlatLiftN}}{{{mem['novelqa']['per_arch']['flat']['lift']:+.2f}}}",
+        f"\\newcommand{{\\memGraphLiftN}}{{{mem['novelqa']['per_arch']['graphrag']['lift']:+.2f}}}",
+    ]
+    write("mainstudy_macros.tex", "\n".join(m) + "\n")
+
+
 def copy_figures() -> None:
     src = MS / "figures"
     for stem in ("pareto_cost_quality", "accuracy_by_arch", "breakeven_curves", "memorization_floor", "cost_composition"):
@@ -312,6 +348,7 @@ def main() -> int:
     breakeven_table()
     significance_table()
     memorization_table()
+    macros()
     copy_figures()
     print(f"\nmemorization floor (for prose, not a table): nocontext "
           f"{mem['nocontext_accuracy']:.4f}, flat {mem['flat_accuracy']:.4f}, "
