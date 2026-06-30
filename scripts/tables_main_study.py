@@ -326,6 +326,7 @@ def macros() -> None:
         f"\\newcommand{{\\memNovelFloor}}{{{mem['novelqa']['closed_book']:.2f}}}",
         f"\\newcommand{{\\memFlatLiftN}}{{{mem['novelqa']['per_arch']['flat']['lift']:+.2f}}}",
         f"\\newcommand{{\\memGraphLiftN}}{{{mem['novelqa']['per_arch']['graphrag']['lift']:+.2f}}}",
+        f"\\newcommand{{\\billedGemini}}{{{cost['billed_gemini']:.2f}}}",
     ]
     write("mainstudy_macros.tex", "\n".join(m) + "\n")
 
