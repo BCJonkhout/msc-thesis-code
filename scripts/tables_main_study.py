@@ -5,7 +5,6 @@ so cross-references keep resolving after the inline tables are swapped out.
 
 Outputs into code/outputs/main_study/export/ (the staging dir promoted to
 thesis-msc/generated/ by make export-assets):
-  mainstudy_quality_ci.tex   -> tab:results-arch-mean   (per-arch quality + 95% CI)
   mainstudy_cost.tex         -> tab:results-cost-quality (deployment cost, both cards)
   mainstudy_cost_decomposition.tex -> tab:results-cost-decomp (build/answer x LLM/embed)
   mainstudy_breakeven.tex    -> tab:results-breakeven    (break-even N* per doc)
@@ -53,35 +52,6 @@ def write(name: str, body: str) -> None:
 def texint(n: int) -> str:
     """Integer with a LaTeX-math thousands separator, e.g. 1348 -> 1{,}348."""
     return f"{n:,}".replace(",", "{,}")
-
-
-def quality_table() -> None:
-    rows = "\n".join(
-        f"{LABEL[a]} & {ci(QA[a])} & {ci(NV[a])} \\\\" for a in ARCHS)
-    qn, qc = texint(QA["flat"]["n_questions"]), QA["flat"]["n_clusters"]
-    nn, nc = texint(NV["flat"]["n_questions"]), NV["flat"]["n_clusters"]
-    body = rf"""\begin{{table}}[ht]
-\centering
-\caption{{Per-architecture answer quality on the held-out evaluation pools
-($N=5$ repeats at $T=0$; QASPER ${qn}$ free-form questions over ${qc}$ papers,
-NovelQA ${nn}$ multiple-choice questions over ${nc}$ novels,
-calibration and held-out novels excluded).
-Cells report the mean with a $95\%$ confidence interval from a paired
-clustered bootstrap ($10{{,}}000$ resamples; clusters are papers for QASPER and
-novels for NovelQA). QASPER is scored with the official Answer-F1 metric;
-NovelQA with held-out Codabench accuracy. The ranking
-Flat $>$ Naive RAG $\gtrsim$ RAPTOR $>$ GraphRAG is identical on both
-datasets; there is no cross-dataset inversion.}}\label{{tab:results-arch-mean}}
-\begin{{tabular}}{{lcc}}
-\toprule
-Architecture & QASPER Answer-F1 [95\% CI] & NovelQA accuracy [95\% CI] \\
-\midrule
-{rows}
-\bottomrule
-\end{{tabular}}
-\end{{table}}
-"""
-    write("mainstudy_quality_ci.tex", body)
 
 
 def cost_table() -> None:
@@ -378,7 +348,7 @@ Statistics use 10{{,}}000 bootstrap resamples and permutation shuffles
 with add-one smoothing~\cite{{dror2018hitchhiker}}.
 The within-dataset medians justified the single-answerer main study;
 they are a pilot diagnostic, superseded by the main study's clustered
-bootstrap (Table~\ref{{tab:results-arch-mean}}).}}
+bootstrap (Figure~\ref{{fig:per-arch-accuracy}}).}}
 \label{{tab:results-tau}}
 \end{{table}}
 """
@@ -397,7 +367,6 @@ def copy_figures() -> None:
 
 def main() -> int:
     print(f"tables + figures -> {EXPORT}")
-    quality_table()
     cost_table()
     cost_decomposition_table()
     breakeven_table()
