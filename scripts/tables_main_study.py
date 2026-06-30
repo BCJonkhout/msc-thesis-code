@@ -327,6 +327,11 @@ def macros() -> None:
         f"\\newcommand{{\\memFlatLiftN}}{{{mem['novelqa']['per_arch']['flat']['lift']:+.2f}}}",
         f"\\newcommand{{\\memGraphLiftN}}{{{mem['novelqa']['per_arch']['graphrag']['lift']:+.2f}}}",
         f"\\newcommand{{\\billedGemini}}{{{cost['billed_gemini']:.2f}}}",
+        f"\\newcommand{{\\nNovelScored}}{{{texint(NV['flat']['n_questions'])}}}",
+        f"\\newcommand{{\\nNovelDocs}}{{{NV['flat']['n_clusters']}}}",
+        f"\\newcommand{{\\nQasperQ}}{{{texint(QA['flat']['n_questions'])}}}",
+        f"\\newcommand{{\\nQasperDocs}}{{{QA['flat']['n_clusters']}}}",
+        f"\\newcommand{{\\nTotalQ}}{{{texint(QA['flat']['n_questions'] + NV['flat']['n_questions'])}}}",
     ]
     write("mainstudy_macros.tex", "\n".join(m) + "\n")
 
