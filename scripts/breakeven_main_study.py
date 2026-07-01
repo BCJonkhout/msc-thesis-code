@@ -375,6 +375,35 @@ def main() -> int:
         assert abs(off_sum - per_arch[("base", a)]["c_off_total"]) < 0.02, \
             (a, off_sum, per_arch[("base", a)]["c_off_total"])
 
+    # ── Per-DATASET deployment cost. The pooled per-architecture totals are dominated
+    #    by the 55 expensive novels, so the pooled cost ranking (and the Pareto plane it
+    #    feeds) blends two ~25x-different workloads; report cost per workload the same way
+    #    quality and break-even are reported. ──────────────────────────────────────────
+    cost_by_ds = {}
+    for card in ("base", "cache"):
+        for ds in DATASETS:
+            for a in ARCHS:
+                d = per_arch_ds[(card, a, ds)]
+                cost_by_ds[f"{card}|{a}|{ds}"] = {
+                    "c_off_total": d["c_off_total"], "c_on_total": d["c_on_total"],
+                    "total": round(d["c_off_total"] + d["c_on_total"], 4),
+                    "c_on_per_query": d["c_on_per_query"],
+                    "n_q": N_Q_DS[ds], "n_docs": N_DOCS_DS[ds]}
+    # re-pool guard: per-dataset deployment totals sum back to the pooled total
+    for a in ARCHS:
+        tot_sum = sum(cost_by_ds[f"base|{a}|{ds}"]["total"] for ds in DATASETS)
+        assert abs(tot_sum - per_arch[("base", a)]["total"]) < 0.02, \
+            (a, tot_sum, per_arch[("base", a)]["total"])
+    (OUT / "cost_by_dataset.json").write_text(json.dumps(cost_by_ds, indent=2), encoding="utf-8")
+
+    print("\nPER-DATASET COST (base card, USD):")
+    for ds in DATASETS:
+        print(f"  {ds}:")
+        for a in ARCHS:
+            c = cost_by_ds[f"base|{a}|{ds}"]
+            print(f"      {a:10s} C_off {c['c_off_total']:7.3f}  C_on {c['c_on_total']:7.3f}  "
+                  f"total {c['total']:7.3f}  C_on/q {c['c_on_per_query']*1000:.3f}m")
+
     print("\nPER-DATASET BREAK-EVEN (base card):")
     for ds in DATASETS:
         fq = per_arch_ds[("base", "flat", ds)]["c_on_per_query"]

@@ -59,7 +59,10 @@ QUAL = {  # dataset -> arch -> (mean, lo, hi)
          for a in ARCHS}
     for ds, d in sig["datasets"].items()
 }
-TOTAL = {a: cost["per_arch"][f"base|{a}"]["total"] for a in ARCHS}          # deployment USD
+TOTAL = {a: cost["per_arch"][f"base|{a}"]["total"] for a in ARCHS}          # deployment USD (pooled)
+costds = json.loads((MS / "cost_by_dataset.json").read_text(encoding="utf-8"))
+COST_DS = {ds: {a: costds[f"base|{a}|{ds}"]["total"] for a in ARCHS}         # per-workload deployment USD
+           for ds in ("qasper", "novelqa")}
 FLOOR = {ds: mem[ds]["closed_book"] for ds in ("qasper", "novelqa")}        # no-document floor
 DS_TITLE = {"qasper": "QASPER (Answer-F1)", "novelqa": "NovelQA (accuracy)"}
 DS_SHORT = {"qasper": "QASPER", "novelqa": "NovelQA"}
@@ -80,21 +83,24 @@ def _marker_kw(a: str) -> dict:
 
 
 def fig_pareto() -> None:
-    """Cost (log x) vs quality (y), one panel per dataset; frontier highlighted."""
+    """Cost (log x) vs quality (y), one panel per dataset. Cost is computed PER WORKLOAD,
+    so each architecture sits at its own cost on each panel (the pooled total blended the two
+    ~25x-different workloads). Frontier highlighted."""
     fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.0))
     for ax, ds in zip(axes, ("qasper", "novelqa")):
+        cst = COST_DS[ds]
         # frontier line: the non-dominated set, sorted by cost (naive_rag -> flat)
-        front = sorted(FRONTIER, key=lambda a: TOTAL[a])
-        ax.plot([TOTAL[a] for a in front], [QUAL[ds][a][0] for a in front],
+        front = sorted(FRONTIER, key=lambda a: cst[a])
+        ax.plot([cst[a] for a in front], [QUAL[ds][a][0] for a in front],
                 "-", color="0.55", lw=1.3, zorder=1, label="Pareto frontier")
         for a in ARCHS:
             m, lo, hi = QUAL[ds][a]
-            ax.errorbar(TOTAL[a], m, yerr=[[m - lo], [hi - m]], elinewidth=1.1,
+            ax.errorbar(cst[a], m, yerr=[[m - lo], [hi - m]], elinewidth=1.1,
                         capsize=2.5, ecolor=COLOR[a], color=COLOR[a], zorder=2,
                         linestyle="none", markersize=8, **_marker_kw(a))
             dom = "" if a in FRONTIER else "  (dominated)"
             va, dy = ("bottom", 1.012) if a != "raptor" else ("top", 0.988)
-            ax.annotate(f"{LABEL[a]}{dom}", (TOTAL[a], m * dy),
+            ax.annotate(f"{LABEL[a]}{dom}", (cst[a], m * dy),
                         fontsize=8.2, ha="center", va=va, color=COLOR[a])
         ax.set_xscale("log")
         ax.set_xlabel("Deployment cost (USD, log scale)")
@@ -107,7 +113,7 @@ def fig_pareto() -> None:
                Line2D([0], [0], marker="^", color="0.3", linestyle="none",
                       markerfacecolor="white", markeredgecolor="0.3", label="dominated")]
     fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.04))
-    fig.suptitle("Cost–quality Pareto: frontier = {Flat, Naive RAG}; RAPTOR and GraphRAG dominated",
+    fig.suptitle("Cost–quality Pareto (per workload): frontier = {Flat, Naive RAG}; RAPTOR and GraphRAG dominated",
                  fontsize=11, y=1.02)
     fig.tight_layout()
     _save(fig, "pareto_cost_quality")
