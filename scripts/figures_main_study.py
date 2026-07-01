@@ -51,6 +51,7 @@ plt.rcParams.update({
 sig = json.loads((MS / "significance.json").read_text(encoding="utf-8"))
 cost = json.loads((MS / "cost_per_arch.json").read_text(encoding="utf-8"))
 brk = json.loads((MS / "breakeven.json").read_text(encoding="utf-8"))
+brk_ds = json.loads((MS / "breakeven_by_dataset.json").read_text(encoding="utf-8"))
 mem = json.loads((MS / "memorization_control.json").read_text(encoding="utf-8"))
 
 QUAL = {  # dataset -> arch -> (mean, lo, hi)
@@ -136,39 +137,40 @@ def fig_accuracy() -> None:
 
 
 def fig_breakeven() -> None:
-    """Amortised deployment cost per query vs questions-per-document; both price cards."""
-    fig, ax = plt.subplots(figsize=(7.4, 4.6))
-    flat_q = cost["per_arch"]["base|flat"]["c_on_per_query"]
-    flat_q_cache = cost["per_arch"]["cache|flat"]["c_on_per_query"]
-    Ns = [n / 2 for n in range(2, 61)]  # 1.0 .. 30.0
-    # Flat's per-query cost under each price card (the break-even targets).
-    ax.axhline(flat_q, color=COLOR["flat"], lw=2.0,
-               label=f"Flat, standard card (${flat_q*1000:.2f}m/q)")
-    ax.axhline(flat_q_cache, color=COLOR["flat"], lw=1.6, ls="--",
-               label=f"Flat, cache card (${flat_q_cache*1000:.2f}m/q)")
-    for a in ("naive_rag", "raptor", "graphrag"):
-        b = brk[f"base|{a}"]
-        coff_doc, onq, nstar = b["c_off_per_doc"], b["c_on_per_query"], b["n_star"]
-        ys = [coff_doc / n + onq for n in Ns]
-        ax.plot(Ns, ys, color=COLOR[a], lw=2.0, label=LABEL[a])
-        if nstar and 1 <= nstar <= 30:  # standard-card crossing
-            yat = coff_doc / nstar + onq
-            ax.plot([nstar], [yat], "o", color=COLOR[a], markersize=7, zorder=5)
-            ax.annotate(f"$N^*\\approx{nstar:.1f}$", (nstar, yat), fontsize=8.6,
-                        color=COLOR[a], xytext=(6, 6), textcoords="offset points")
-    ax.set_yscale("log")
-    ax.set_xlim(1, 30)
-    ymin, ymax = ax.get_ylim()
-    # real operating densities (labels at the top; the legend now sits outside the axes)
-    for x, txt in ((4, "QASPER $\\approx$ 4 q/paper"), (25, "NovelQA $\\approx$ 25 q/novel")):
-        ax.axvline(x, color="0.6", ls=":", lw=1.0)
-        ax.text(x - 0.4, ymax * 0.9, txt, rotation=90, va="top", ha="right",
-                fontsize=7.6, color="0.4")
-    ax.set_xlabel("Questions per document $N$ (build cost amortised over $N$ queries)")
-    ax.set_ylabel("Amortised deployment cost per query (USD, log scale)")
-    ax.set_title("Break-even vs Flat: structured builds pay back only at high $N$", fontsize=10.5)
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8.4, borderaxespad=0.0)
-    fig.tight_layout()
+    """Amortised deployment cost per query vs questions-per-document, computed PER
+    WORKLOAD. Build cost and Flat's per-query cost both scale with document length, so
+    the two workloads have different break-even geometry and are shown as separate panels
+    (a single pooled crossing describes neither)."""
+    fig, axes = plt.subplots(1, 2, figsize=(9.8, 4.4))
+    panels = [("qasper", "QASPER", 15, 4), ("novelqa", "NovelQA", 80, 25)]
+    for ax, (ds, name, xmax, dens) in zip(axes, panels):
+        flat_q = brk_ds[f"base|raptor|{ds}"]["flat_c_on_per_query"]
+        flat_qc = brk_ds[f"cache|raptor|{ds}"]["flat_c_on_per_query"]
+        Ns = [1 + (xmax - 1) * i / 160 for i in range(161)]
+        ax.axhline(flat_q, color=COLOR["flat"], lw=2.0, label=f"Flat, std (${flat_q*1000:.2f}m/q)")
+        ax.axhline(flat_qc, color=COLOR["flat"], lw=1.5, ls="--", label=f"Flat, cache (${flat_qc*1000:.2f}m/q)")
+        for a in ("naive_rag", "raptor", "graphrag"):
+            b = brk_ds[f"base|{a}|{ds}"]
+            coff, onq, nstar = b["c_off_per_doc"], b["c_on_per_query"], b["n_star"]
+            ax.plot(Ns, [coff / n + onq for n in Ns], color=COLOR[a], lw=2.0, label=LABEL[a])
+            if nstar and 1 <= nstar <= xmax:  # standard-card crossing within range
+                yat = coff / nstar + onq
+                ax.plot([nstar], [yat], "o", color=COLOR[a], markersize=6, zorder=5)
+                ax.annotate(f"$N^*\\approx{nstar:.0f}$", (nstar, yat), fontsize=8.2,
+                            color=COLOR[a], xytext=(5, 5), textcoords="offset points")
+        ax.axvline(dens, color="0.55", ls=":", lw=1.1)
+        ax.set_yscale("log")
+        ax.set_xlim(1, xmax)
+        _, ymax = ax.get_ylim()
+        ax.text(dens, ymax * 0.85, f"  {name} $\\approx{dens}$ q/doc",
+                rotation=90, va="top", ha="left", fontsize=7.4, color="0.35")
+        ax.set_xlabel("Questions per document $N$")
+        ax.set_title(name, fontsize=10.5)
+        ax.legend(loc="upper right", fontsize=7.4)
+    axes[0].set_ylabel("Amortised cost per query (USD, log scale)")
+    fig.suptitle("Break-even vs Flat, per workload: structured builds pay back only above $N^\\star$",
+                 fontsize=10.5)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     _save(fig, "breakeven_curves")
 
 

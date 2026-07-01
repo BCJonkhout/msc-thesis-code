@@ -146,6 +146,9 @@ def main() -> int:
             incl_nov.add(cl)
     N_Q = len(q_keys)
     N_DOCS = len(doc_keys)
+    N_Q_DS = Counter(ds for (ds, _cl, _qid) in q_keys)
+    N_DOCS_DS = Counter(ds for (ds, _cl) in doc_keys)
+    DATASETS = ["qasper", "novelqa"]
 
     def included(ds: str, pid: str) -> bool:
         return not (ds == "novelqa" and pid not in incl_nov)
@@ -162,6 +165,9 @@ def main() -> int:
     gem = {"base": defaultdict(float), "cache": defaultdict(float)}  # (arch, off|on) -> usd, included only
     emb = defaultdict(lambda: [0, 0])  # (arch, off|on) -> [calls, chars], included only
     gen_tok = defaultdict(lambda: [0, 0, 0])  # arch -> [uncached, cached, output] answer tokens (included, run0)
+    # per-dataset mirrors (identical attribution, keyed by dataset) for per-workload break-even
+    gem_ds = {"base": defaultdict(float), "cache": defaultdict(float)}  # (arch, ds, off|on) -> usd
+    emb_ds = defaultdict(lambda: [0, 0])  # (arch, ds, off|on) -> [calls, chars]
     billed_gem = 0.0  # all gemini rows, all repeats, full grid (billing reconciliation)
     doc_tokens = defaultdict(int)  # included doc id -> full-context tokens (flat first-query uncached)
     genptr = Counter()
@@ -190,16 +196,20 @@ def main() -> int:
                 for o2 in pend_off_gem[a]:
                     r = _rec(o2)
                     if r is not None:
-                        gem["base"][(a, "off")] += _row_cost_usd(r, pc_base)
-                        gem["cache"][(a, "off")] += _row_cost_usd(r, pc_cache)
+                        cb = _row_cost_usd(r, pc_base); cc = _row_cost_usd(r, pc_cache)
+                        gem["base"][(a, "off")] += cb; gem["cache"][(a, "off")] += cc
+                        gem_ds["base"][(a, ds, "off")] += cb; gem_ds["cache"][(a, ds, "off")] += cc
                 emb[(a, "off")][0] += pend_off_emb[a][0]; emb[(a, "off")][1] += pend_off_emb[a][1]
                 emb[(a, "on")][0] += pend_on_emb[a][0]; emb[(a, "on")][1] += pend_on_emb[a][1]
+                emb_ds[(a, ds, "off")][0] += pend_off_emb[a][0]; emb_ds[(a, ds, "off")][1] += pend_off_emb[a][1]
+                emb_ds[(a, ds, "on")][0] += pend_on_emb[a][0]; emb_ds[(a, ds, "on")][1] += pend_on_emb[a][1]
             pend_off_gem[a] = []; pend_off_emb[a] = [0, 0]; pend_on_emb[a] = [0, 0]
             if isg and inc:
                 r = _rec(o)
                 if r is not None:
-                    gem["base"][(a, "on")] += _row_cost_usd(r, pc_base)
-                    gem["cache"][(a, "on")] += _row_cost_usd(r, pc_cache)
+                    cb = _row_cost_usd(r, pc_base); cc = _row_cost_usd(r, pc_cache)
+                    gem["base"][(a, "on")] += cb; gem["cache"][(a, "on")] += cc
+                    gem_ds["base"][(a, ds, "on")] += cb; gem_ds["cache"][(a, ds, "on")] += cc
                     gen_tok[a][0] += o.get("uncached_input_tokens", 0) or 0
                     gen_tok[a][1] += o.get("cached_input_tokens", 0) or 0
                     gen_tok[a][2] += o.get("output_tokens", 0) or 0
@@ -319,7 +329,68 @@ def main() -> int:
         "billed_gemini": round(billed_gem, 2), "n_questions": N_Q, "n_docs": N_DOCS,
     }, indent=2), encoding="utf-8")
     (OUT / "breakeven.json").write_text(json.dumps(keyed(breakeven), indent=2), encoding="utf-8")
-    print(f"\nwrote {OUT/'cost_per_arch.json'} + {OUT/'breakeven.json'}")
+
+    # ── Per-DATASET break-even. The pooled N* above blends two workloads that
+    #    differ ~25x in document length (QASPER papers vs NovelQA novels); RQ3 is a
+    #    per-workload question, so recompute build/doc, the flat marginal, and N*
+    #    within each dataset. Identical attribution, keyed by dataset. ────────────
+    def embed_usd_ds(a, ds, bucket):
+        calls, chars = emb_ds[(a, ds, bucket)]
+        return (calls * EMBED_FIXED_S_PER_CALL + chars * EMBED_MARGINAL_S_PER_CHAR) * gpu_rate
+
+    per_arch_ds, breakeven_ds = {}, {}
+    for card in ("base", "cache"):
+        for ds in DATASETS:
+            nq = N_Q_DS[ds]
+            for a in ARCHS:
+                c_off = gem_ds[card][(a, ds, "off")] + embed_usd_ds(a, ds, "off")
+                c_on = gem_ds[card][(a, ds, "on")] + embed_usd_ds(a, ds, "on")
+                per_arch_ds[(card, a, ds)] = {
+                    "c_off_total": round(c_off, 4), "c_on_total": round(c_on, 4),
+                    "c_on_per_query": round(c_on / nq, 6) if nq else 0.0}
+        for ds in DATASETS:
+            nq, ndocs = N_Q_DS[ds], N_DOCS_DS[ds]
+            flat_onq = per_arch_ds[(card, "flat", ds)]["c_on_per_query"]
+            for a in ARCHS:
+                if a == "flat":
+                    continue
+                coff_doc = per_arch_ds[(card, a, ds)]["c_off_total"] / ndocs if ndocs else 0.0
+                onq = per_arch_ds[(card, a, ds)]["c_on_per_query"]
+                curve = {N: round(coff_doc / N + onq, 6) for N in (1, 2, 5, 10, 25)}
+                if flat_onq > onq:
+                    nstar = coff_doc / (flat_onq - onq)
+                    verdict = f"break-even at N*={nstar:.1f} q/doc"
+                else:
+                    nstar = None
+                    verdict = "never cheaper than flat (per-query cost exceeds flat's marginal)"
+                breakeven_ds[(card, a, ds)] = {
+                    "dataset": ds, "c_off_per_doc": round(coff_doc, 6),
+                    "c_on_per_query": onq, "flat_c_on_per_query": flat_onq,
+                    "density": round(nq / ndocs, 2) if ndocs else None,
+                    "n_star": nstar, "amortized_per_query_by_N": curve, "verdict": verdict}
+
+    # re-pool guard: the per-dataset build costs must sum back to the pooled figure
+    for a in ARCHS:
+        off_sum = sum(per_arch_ds[("base", a, ds)]["c_off_total"] for ds in DATASETS)
+        assert abs(off_sum - per_arch[("base", a)]["c_off_total"]) < 0.02, \
+            (a, off_sum, per_arch[("base", a)]["c_off_total"])
+
+    print("\nPER-DATASET BREAK-EVEN (base card):")
+    for ds in DATASETS:
+        fq = per_arch_ds[("base", "flat", ds)]["c_on_per_query"]
+        dens = N_Q_DS[ds] / max(1, N_DOCS_DS[ds])
+        print(f"  {ds} (N_Q {N_Q_DS[ds]}, docs {N_DOCS_DS[ds]}, density {dens:.2f} q/doc, "
+              f"flat C_on/q {fq*1000:.3f}m):")
+        for a in ("naive_rag", "raptor", "graphrag"):
+            b = breakeven_ds[("base", a, ds)]
+            ns = f"N*={b['n_star']:.1f}" if b["n_star"] is not None else "NEVER"
+            print(f"      {a:10s} C_off/doc {b['c_off_per_doc']*1000:8.3f}m  "
+                  f"C_on/q {b['c_on_per_query']*1000:.3f}m  -> {ns}")
+
+    def keyed_ds(d):
+        return {f"{c}|{a}|{ds}": v for (c, a, ds), v in d.items()}
+    (OUT / "breakeven_by_dataset.json").write_text(json.dumps(keyed_ds(breakeven_ds), indent=2), encoding="utf-8")
+    print(f"\nwrote cost_per_arch.json + breakeven.json + breakeven_by_dataset.json")
     return 0
 
 

@@ -28,6 +28,7 @@ LABEL = {"flat": "Flat", "naive_rag": "Naive RAG", "raptor": "RAPTOR", "graphrag
 sig = json.loads((MS / "significance.json").read_text(encoding="utf-8"))
 cost = json.loads((MS / "cost_per_arch.json").read_text(encoding="utf-8"))
 brk = json.loads((MS / "breakeven.json").read_text(encoding="utf-8"))
+brk_ds = json.loads((MS / "breakeven_by_dataset.json").read_text(encoding="utf-8"))
 mem = json.loads((MS / "memorization_control.json").read_text(encoding="utf-8"))
 
 QA = sig["datasets"]["qasper"]["per_arch"]
@@ -153,38 +154,54 @@ Architecture & LLM & embed & LLM & embed & Deploy & Storage \\
 
 
 def breakeven_table() -> None:
-    flat_q = PC["base|flat"]["c_on_per_query"]
-    rows = []
-    for a in ("naive_rag", "raptor", "graphrag"):
-        bb = brk[f"base|{a}"]
-        bc = brk[f"cache|{a}"]
-        nb = bb["n_star"]
-        nc = bc["n_star"]
-        nb_s = "any $N\\ge1$" if nb is not None and nb < 1 else (f"{nb:.1f}" if nb else "---")
-        nc_s = "any $N\\ge1$" if nc is not None and nc < 1 else (f"{nc:.1f}" if nc else "---")
-        rows.append(
-            f"{LABEL[a]} & {bb['c_off_per_doc']*1000:.2f} & {bb['c_on_per_query']*1000:.3f} "
-            f"& {nb_s} & {nc_s} \\\\")
-    rows_tex = "\n".join(rows)
+    def fmt_nstar(b):
+        n = b["n_star"]
+        if n is None:
+            return "never"
+        return "any $N\\ge1$" if n < 1 else f"{n:.1f}"
+
+    def rows(ds):
+        out = []
+        for a in ("naive_rag", "raptor", "graphrag"):
+            bb, bc = brk_ds[f"base|{a}|{ds}"], brk_ds[f"cache|{a}|{ds}"]
+            out.append(f"{LABEL[a]} & {bb['c_off_per_doc']*1000:.2f} & {bb['c_on_per_query']*1000:.3f} "
+                       f"& {fmt_nstar(bb)} & {fmt_nstar(bc)} \\\\")
+        return "\n".join(out)
+
+    def flatq(ds, card):
+        return brk_ds[f"{card}|raptor|{ds}"]["flat_c_on_per_query"] * 1000
+
+    qd = brk_ds["base|raptor|qasper"]["density"]
+    nd = brk_ds["base|raptor|novelqa"]["density"]
+    qr = brk_ds["base|raptor|qasper"]["n_star"]
+    nr = brk_ds["base|raptor|novelqa"]["n_star"]
+    ng = brk_ds["base|graphrag|novelqa"]["n_star"]
     body = rf"""\begin{{table}}[ht]
 \centering
-\caption{{Break-even query density versus cache-aware Flat. A structured
-architecture amortizes its per-document build cost $C_{{\text{{off}}}}/\text{{doc}}$
-over $N$ queries; $N^\star$ is the questions-per-document density at which its
-amortized cost per query falls below Flat's marginal
-{flat_q*1000:.2f}~m\$ per query. Reported under both price cards. Naive RAG is
-cheaper than Flat at any density. RAPTOR and GraphRAG repay their build cost only
-above $N^\star$: on the short QASPER workload ($\approx4$ q/paper) neither reaches
-break-even, whereas on the long NovelQA workload ($\approx25$ q/novel) both do
-(RAPTOR well past it, GraphRAG just above). Even where the build cost is recovered,
-they answer no better than Flat and Naive RAG remains cheaper, so break-even never
-converts into a quality or cost-position advantage.}}\label{{tab:results-breakeven}}
+\caption{{Break-even query density versus cache-aware Flat, computed \emph{{within each
+workload}}: the per-document build cost and Flat's per-query cost both scale with document
+length, so a single pooled threshold describes neither. A structured architecture amortizes
+its per-document build $C_{{\text{{off}}}}/\text{{doc}}$ over $N$ queries; $N^\star$ is the
+questions-per-document density at which its amortized cost per query drops below Flat's
+marginal. Naive RAG is cheaper than Flat at any density on both workloads. On QASPER
+($\approx{qd:.0f}$ q/paper) neither structured method repays: RAPTOR needs
+$N^\star\approx{qr:.0f}$, above the density, and GraphRAG \emph{{never}} breaks even because
+its per-query cost already exceeds Flat's re-read of the short paper. On NovelQA
+($\approx{nd:.0f}$ q/novel) RAPTOR repays under the standard card ($N^\star\approx{nr:.0f}$)
+but not under the cache-discount card, while GraphRAG needs $\approx{ng:.0f}$ q/novel, far
+above the workload. Even where a build is recovered the method answers no better than Flat and
+Naive RAG stays cheaper, so break-even never becomes a quality or cost-position
+advantage.}}\label{{tab:results-breakeven}}
 \begin{{tabular}}{{lrrcc}}
 \toprule
  & $C_{{\text{{off}}}}$/doc & $C_{{\text{{on}}}}$/query & $N^\star$ & $N^\star$ \\
 Architecture & (m\$) & (m\$) & std & cache \\
 \midrule
-{rows_tex}
+\multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ q/paper; Flat {flatq('qasper','base'):.2f}/{flatq('qasper','cache'):.2f}~m\$/q std/cache)}} \\
+{rows('qasper')}
+\midrule
+\multicolumn{{5}}{{l}}{{\textit{{NovelQA}} ($\approx{nd:.0f}$ q/novel; Flat {flatq('novelqa','base'):.2f}/{flatq('novelqa','cache'):.2f}~m\$/q std/cache)}} \\
+{rows('novelqa')}
 \bottomrule
 \end{{tabular}}
 \end{{table}}
@@ -290,8 +307,12 @@ def macros() -> None:
         f"\\newcommand{{\\costRaptor}}{{{PC['base|raptor']['total']:.2f}}}",
         f"\\newcommand{{\\costFlat}}{{{PC['base|flat']['total']:.2f}}}",
         f"\\newcommand{{\\costGraph}}{{{PC['base|graphrag']['total']:.2f}}}",
-        f"\\newcommand{{\\nstarRaptor}}{{{round(brk['base|raptor']['n_star'])}}}",
-        f"\\newcommand{{\\nstarGraph}}{{{round(brk['base|graphrag']['n_star'])}}}",
+        f"\\newcommand{{\\nstarRaptorQ}}{{{round(brk_ds['base|raptor|qasper']['n_star'])}}}",
+        f"\\newcommand{{\\nstarRaptorN}}{{{round(brk_ds['base|raptor|novelqa']['n_star'])}}}",
+        f"\\newcommand{{\\nstarRaptorNcache}}{{{round(brk_ds['cache|raptor|novelqa']['n_star'])}}}",
+        f"\\newcommand{{\\nstarGraphN}}{{{round(brk_ds['base|graphrag|novelqa']['n_star'])}}}",
+        f"\\newcommand{{\\densQasper}}{{{round(brk_ds['base|raptor|qasper']['density'])}}}",
+        f"\\newcommand{{\\densNovel}}{{{round(brk_ds['base|raptor|novelqa']['density'])}}}",
         f"\\newcommand{{\\memQasperFloor}}{{{mem['qasper']['closed_book']:.2f}}}",
         f"\\newcommand{{\\memNovelFloor}}{{{mem['novelqa']['closed_book']:.2f}}}",
         f"\\newcommand{{\\memFlatLiftN}}{{{mem['novelqa']['per_arch']['flat']['lift']:+.2f}}}",
