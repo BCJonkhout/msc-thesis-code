@@ -8,7 +8,8 @@ thesis-msc/generated/ by make export-assets):
   mainstudy_cost.tex         -> tab:results-cost-quality (deployment cost, both cards)
   mainstudy_cost_decomposition.tex -> tab:results-cost-decomp (build/answer x LLM/embed)
   mainstudy_breakeven.tex    -> tab:results-breakeven    (break-even N* per doc)
-  mainstudy_significance.tex -> tab:results-significance (paired clustered bootstrap)
+(mainstudy_significance.tex is owned by significance_main_study.py, which emits the
+Holm-adjusted six-pair table; this script no longer writes it.)
 The three figure PDFs/PNGs are also copied in with stable paper names.
 """
 from __future__ import annotations
@@ -35,6 +36,10 @@ mem = json.loads((MS / "memorization_control.json").read_text(encoding="utf-8"))
 QA = sig["datasets"]["qasper"]["per_arch"]
 NV = sig["datasets"]["novelqa"]["per_arch"]
 PC = cost["per_arch"]
+
+# The main-study run directory (predictions + call ledger), for the few macros
+# whose values are measured per-call rather than pre-aggregated in the JSONs.
+RUN = sorted((ROOT / "outputs" / "runs").glob("main-full-*"))[0]
 
 
 def ci(d: dict) -> str:
@@ -203,41 +208,6 @@ Architecture & (m\$) & (m\$) & std & cache \\
     write("mainstudy_breakeven.tex", body)
 
 
-def significance_table() -> None:
-    def block(ds_key: str, ds_name: str) -> str:
-        pw = sig["datasets"][ds_key]["pairwise"]
-        out = [f"\\multicolumn{{5}}{{l}}{{\\textit{{{ds_name}}}}} \\\\"]
-        for p in pw:
-            star = "yes" if p["significant"] else "no"
-            pv = p["p_value"]
-            p_str = "$<0.001$" if pv < 0.001 else f"{pv:.3f}"
-            out.append(
-                f"{LABEL[p['a']]} vs {LABEL[p['b']]} & {p['mean_diff']:+.3f} & "
-                f"[{p['ci_low']:+.3f}, {p['ci_high']:+.3f}] & {p_str} & {star} \\\\")
-        return "\n".join(out)
-    nr = next(p for p in sig["datasets"]["novelqa"]["pairwise"]
-              if {p["a"], p["b"]} == {"naive_rag", "raptor"})
-    body = rf"""\begin{{table}}[ht]
-\centering
-\caption{{Paired clustered-bootstrap significance ($10{{,}}000$ resamples,
-percentile $95\%$ CI on the mean difference and the two-sided bootstrap $p$-value ($p<0.05$ counts as significant); clusters are papers for QASPER and
-novels for NovelQA). Every QASPER pair is significant. On NovelQA every pair is
-significant except Naive RAG versus RAPTOR (${nr['mean_diff']:+.3f}$, CI straddles zero),
-which are statistically tied.}}\label{{tab:results-significance}}
-\begin{{tabular}}{{lrccc}}
-\toprule
-Pair & $\Delta$ mean & 95\% CI of $\Delta$ & $p$ & Significant \\
-\midrule
-{block("qasper", "QASPER (Answer-F1)")}
-\midrule
-{block("novelqa", "NovelQA (accuracy)")}
-\bottomrule
-\end{{tabular}}
-\end{{table}}
-"""
-    write("mainstudy_significance.tex", body)
-
-
 def memorization_table() -> None:
     """Per-architecture quality vs the closed-book floor, both datasets."""
     nv, qa = mem["novelqa"], mem["qasper"]
@@ -259,9 +229,9 @@ scores are memorization-inflated, whereas QASPER's research papers are not recal
 (with-document minus closed-book) measures the usable evidence each architecture
 supplies: Flat lifts NovelQA accuracy by ${nv['per_arch']['flat']['lift']:+.2f}$,
 whereas GraphRAG adds almost nothing (${nv['per_arch']['graphrag']['lift']:+.2f}$)
-over closed-book guessing. The architecture ranking is the same with and without
-the memorization caveat, so the comparison is not confounded by memorization
-even though the NovelQA absolute level is.}}\label{{tab:results-memorization}}
+over closed-book guessing. The same architecture ranking is reproduced on the
+low-recall QASPER workload, so the comparative finding does not rest on
+memorized recall.}}\label{{tab:results-memorization}}
 \begin{{tabular}}{{lcccc}}
 \toprule
  & \multicolumn{{2}}{{c}}{{QASPER Answer-F1}} & \multicolumn{{2}}{{c}}{{NovelQA accuracy}} \\
@@ -275,16 +245,117 @@ Architecture & with doc. & lift & with doc. & lift \\
     write("mainstudy_memorization.tex", body)
 
 
+def _iter_jsonl(path: Path):
+    """Yield dict rows from a JSONL/concatenated-JSON file robustly (same
+    tolerance as breakeven_main_study.iter_ledger)."""
+    dec = json.JSONDecoder()
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            s, pos = raw.strip(), 0
+            while pos < len(s):
+                while pos < len(s) and s[pos].isspace():
+                    pos += 1
+                if pos >= len(s):
+                    break
+                try:
+                    o, pos = dec.raw_decode(s, pos)
+                except json.JSONDecodeError:
+                    break
+                if isinstance(o, dict):
+                    yield o
+
+
+def doc_token_means() -> dict[str, float]:
+    """Mean full-document context length per dataset (Gemini tokens), measured
+    over the scored (post-exclusion) cohort: each document's full-context read
+    by the flat architecture, recovered from the run ledger with the same
+    attribution breakeven_main_study.py uses for doc_tokens (ledger rows map to
+    predictions in execution order; per document, the max uncached input tokens
+    over its run-index-0 generate rows). Cross-check: the NovelQA mean agrees
+    with bookmeta.json's per-novel tokenlen over the same 55 novels to within
+    ~2% (tokenizer difference)."""
+    scored = {"qasper": set(), "novelqa": set()}
+    for o in _iter_jsonl(MS / "scored_cells.jsonl"):
+        scored[o["dataset"]].add(o["cluster"])
+    order = [(o["dataset"], o["paper_id"])
+             for o in _iter_jsonl(RUN / "flat_predictions.jsonl")
+             if o.get("run_index") == 0]
+    dec = json.JSONDecoder()
+    toks: dict[tuple[str, str], int] = {}
+    i = 0
+    with open(RUN / "ledger.jsonl", encoding="utf-8") as fh:
+        for raw in fh:
+            # cheap substring pre-filter only; the exact fields are re-checked
+            # on the parsed object below (a flat/generate row always contains
+            # both quoted values, so no qualifying row can be skipped).
+            if '"flat"' not in raw or '"generate"' not in raw:
+                continue
+            s, pos = raw.strip(), 0
+            while pos < len(s):
+                while pos < len(s) and s[pos].isspace():
+                    pos += 1
+                if pos >= len(s):
+                    break
+                try:
+                    o, pos = dec.raw_decode(s, pos)
+                except json.JSONDecodeError:
+                    break
+                if not (isinstance(o, dict) and o.get("architecture") == "flat"
+                        and o.get("stage") == "generate" and o.get("run_index") == 0):
+                    continue
+                ds, pid = order[i]
+                i += 1
+                if pid in scored[ds]:
+                    toks[(ds, pid)] = max(toks.get((ds, pid), 0),
+                                          o.get("uncached_input_tokens", 0) or 0)
+    if i != len(order):
+        raise RuntimeError(f"ledger vs predictions row mismatch: {i} != {len(order)}")
+    means: dict[str, float] = {}
+    for ds in ("qasper", "novelqa"):
+        v = [t for (d, _), t in toks.items() if d == ds]
+        means[ds] = sum(v) / len(v)
+    return means
+
+
+def repeat_identity_min_novel() -> float:
+    """Minimum across architectures of the NovelQA repeat-identity rate: the
+    percentage of answered NovelQA questions whose five T=0 repeats parse to
+    the same option letter (predicted_letter, the scoring parse). This is the
+    determinism check that lets run-index-0 stand in for all five repeats in
+    scored_cells (see build_scored_cells.py)."""
+    worst = 100.0
+    for a in ARCHS:
+        letters: dict[tuple[str, str], dict[int, object]] = {}
+        for o in _iter_jsonl(RUN / f"{a}_predictions.jsonl"):
+            if o.get("dataset") != "novelqa":
+                continue
+            letters.setdefault((o["paper_id"], o["question_id"]), {})[
+                o["run_index"]] = o.get("predicted_letter")
+        full = [v for v in letters.values() if len(v) == 5]
+        pct = 100.0 * sum(1 for v in full if len(set(v.values())) == 1) / len(full)
+        worst = min(worst, pct)
+    return worst
+
+
 def macros() -> None:
     """Inline result numbers as \\input-able \\newcommand macros, so values can stay in
     the prose while still living in exactly one regenerated place (no hand-typed metrics).
-    Driven from the same JSONs as the tables. LaTeX control sequences are letters-only,
+    Driven from the same JSONs as the tables, plus the run ledger for the measured
+    document-length and repeat-identity macros. LaTeX control sequences are letters-only,
     so e.g. Answer-F1 -> \\qFlatFone."""
     def fp(ds: str, a: str, b: str) -> dict:
         return next(p for p in sig["datasets"][ds]["pairwise"]
                     if {p["a"], p["b"]} == {a, b})
     fn = fp("qasper", "flat", "naive_rag")
     nr = fp("novelqa", "naive_rag", "raptor")
+    dt = doc_token_means()
+
+    def storage_pct(a: str) -> str:
+        # storage share of the architecture's study-wide cost, in percent
+        # (two significant figures); prose appends \% itself.
+        b = PC[f"base|{a}"]
+        return f"{100 * b['c_store_total'] / (b['total'] + b['c_store_total']):.2g}"
+
     m = [
         f"\\newcommand{{\\qFlatFone}}{{{QA['flat']['mean']:.3f}}}",
         f"\\newcommand{{\\qNaiveFone}}{{{QA['naive_rag']['mean']:.3f}}}",
@@ -305,18 +376,33 @@ def macros() -> None:
         f"\\newcommand{{\\nstarRaptorN}}{{{round(brk_ds['base|raptor|novelqa']['n_star'])}}}",
         f"\\newcommand{{\\nstarRaptorNcache}}{{{round(brk_ds['cache|raptor|novelqa']['n_star'])}}}",
         f"\\newcommand{{\\nstarGraphN}}{{{round(brk_ds['base|graphrag|novelqa']['n_star'])}}}",
+        f"\\newcommand{{\\nstarGraphNcache}}{{{round(brk_ds['cache|graphrag|novelqa']['n_star'])}}}",
         f"\\newcommand{{\\densQasper}}{{{round(brk_ds['base|raptor|qasper']['density'])}}}",
         f"\\newcommand{{\\densNovel}}{{{round(brk_ds['base|raptor|novelqa']['density'])}}}",
         f"\\newcommand{{\\memQasperFloor}}{{{mem['qasper']['closed_book']:.2f}}}",
         f"\\newcommand{{\\memNovelFloor}}{{{mem['novelqa']['closed_book']:.2f}}}",
         f"\\newcommand{{\\memFlatLiftN}}{{{mem['novelqa']['per_arch']['flat']['lift']:+.2f}}}",
         f"\\newcommand{{\\memGraphLiftN}}{{{mem['novelqa']['per_arch']['graphrag']['lift']:+.2f}}}",
+        f"\\newcommand{{\\memFlatLiftQ}}{{{mem['qasper']['per_arch']['flat']['lift']:+.2f}}}",
+        f"\\newcommand{{\\memGraphLiftQ}}{{{mem['qasper']['per_arch']['graphrag']['lift']:+.2f}}}",
         f"\\newcommand{{\\billedGemini}}{{{cost['billed_gemini']:.2f}}}",
         f"\\newcommand{{\\nNovelScored}}{{{texint(NV['flat']['n_questions'])}}}",
         f"\\newcommand{{\\nNovelDocs}}{{{NV['flat']['n_clusters']}}}",
         f"\\newcommand{{\\nQasperQ}}{{{texint(QA['flat']['n_questions'])}}}",
         f"\\newcommand{{\\nQasperDocs}}{{{QA['flat']['n_clusters']}}}",
         f"\\newcommand{{\\nTotalQ}}{{{texint(QA['flat']['n_questions'] + NV['flat']['n_questions'])}}}",
+        f"\\newcommand{{\\nTotalDocs}}{{{cost['n_docs']}}}",
+        # measured document lengths (ledger full-context reads, scored cohort):
+        # NovelQA mean in kilotokens to the nearest 10, QASPER to the nearest 1,
+        # and their raw-mean ratio to the nearest 5.
+        f"\\newcommand{{\\docTokensNovelK}}{{{round(dt['novelqa'] / 10000) * 10}}}",
+        f"\\newcommand{{\\docTokensQasperK}}{{{round(dt['qasper'] / 1000)}}}",
+        f"\\newcommand{{\\docLenRatio}}{{{round(dt['novelqa'] / dt['qasper'] / 5) * 5}}}",
+        f"\\newcommand{{\\repeatIdentityMinN}}{{{repeat_identity_min_novel():.1f}}}",
+        f"\\newcommand{{\\storagePctFlat}}{{{storage_pct('flat')}}}",
+        f"\\newcommand{{\\storagePctNaive}}{{{storage_pct('naive_rag')}}}",
+        f"\\newcommand{{\\storagePctRaptor}}{{{storage_pct('raptor')}}}",
+        f"\\newcommand{{\\storagePctGraph}}{{{storage_pct('graphrag')}}}",
     ]
     write("mainstudy_macros.tex", "\n".join(m) + "\n")
 
@@ -340,6 +426,7 @@ def tau_table() -> None:
         n = len(taus)
         return dict(mean=cd["blocks"][f"{view}_only"]["mean_tau"],
                     perfect=sum(1 for t in taus if t >= 0.999),
+                    ge23=sum(1 for t in taus if t >= 2 / 3 - 1e-9),
                     le0=sum(1 for t in taus if t <= 0), n=n,
                     p=sci(ks[view]["permutation_test"]["p_value_one_sided"]))
 
@@ -354,6 +441,7 @@ Median pairwise \(\tau_b\)               & \(2/3\) & \(2/3\) \\
 Mean pairwise \(\tau_b\)                 & {nv['mean']:.3f} & {qa['mean']:.3f} \\
 Permutation \(p\) value (one-sided)      & {nv['p']} & {qa['p']} \\
 Pairs with perfect agreement \(\tau_b = 1\) & {nv['perfect']} / {nv['n']} & {qa['perfect']} / {qa['n']} \\
+Pairs with \(\tau_b \geq 2/3\)              & {nv['ge23']} / {nv['n']} & {qa['ge23']} / {qa['n']} \\
 Pairs with \(\tau_b \leq 0\) (rank-disagreement) & {nv['le0']} / {nv['n']} & {qa['le0']} / {qa['n']} \\
 \bottomrule
 \end{{tabular}}
@@ -361,7 +449,7 @@ Pairs with \(\tau_b \leq 0\) (rank-disagreement) & {nv['le0']} / {nv['n']} & {qa
 candidate-pairs on each dataset under gold scoring.
 Statistics use 10{{,}}000 bootstrap resamples and permutation shuffles
 with add-one smoothing~\cite{{dror2018hitchhiker}}.
-The within-dataset medians justified the single-answerer main study;
+The within-dataset medians informed the single-answerer design;
 they are a pilot diagnostic, superseded by the main study's clustered
 bootstrap (Figure~\ref{{fig:per-arch-accuracy}}).}}
 \label{{tab:results-tau}}
@@ -385,7 +473,6 @@ def main() -> int:
     cost_table()
     cost_decomposition_table()
     breakeven_table()
-    significance_table()
     memorization_table()
     tau_table()
     macros()

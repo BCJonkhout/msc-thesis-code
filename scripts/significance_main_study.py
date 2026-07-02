@@ -10,11 +10,14 @@ Per dataset (QASPER, NovelQA) this computes:
      of the 10,000 resamples draws clusters with replacement and recomputes the
      mean over every question in the drawn clusters; the CI is the 2.5th/97.5th
      percentile of that bootstrap distribution.
-  3. All pairwise PAIRED comparisons of interest (flat vs each retrieval
-     architecture, plus naive_rag vs raptor). For each question present under
-     both architectures we take the paired difference A - B on the metric, then
-     clustered-bootstrap the mean paired difference. A two-sided bootstrap
-     p-value is 2 * min(frac > 0, frac < 0), clamped to [0, 1].
+  3. All six pairwise PAIRED comparisons among the four architectures. For
+     each question present under both architectures we take the paired
+     difference A - B on the metric, then clustered-bootstrap the mean paired
+     difference. A two-sided bootstrap p-value is 2 * min(frac > 0, frac < 0),
+     clamped to [0, 1]. Because the six tests per dataset form one family, a
+     Holm-Bonferroni adjusted p-value is reported alongside the raw p; the
+     tie verdict itself follows the paper's rule (95% CI includes zero =>
+     statistically tied).
 
 The five per-question repeats are deterministic at T=0, so each stored metric is
 already the repeat value; the only meaningful uncertainty is the question-level
@@ -40,13 +43,17 @@ N_RESAMPLES = 10_000
 
 ARCHS = ["flat", "naive_rag", "raptor", "graphrag"]
 
-# Pairwise comparisons to report: flat vs every retrieval architecture, plus the
-# near-tied naive_rag vs raptor contrast that motivates a formal test.
+# All six pairwise comparisons among the four architectures, in canonical order:
+# each architecture against every later one in ARCHS order. Every pair reuses
+# the same precomputed bootstrap weights, so extending this list never perturbs
+# the resamples (or the results) of the pairs before it.
 PAIRS = [
     ("flat", "naive_rag"),
     ("flat", "raptor"),
     ("flat", "graphrag"),
     ("naive_rag", "raptor"),
+    ("naive_rag", "graphrag"),
+    ("raptor", "graphrag"),
 ]
 
 DATASETS = ["qasper", "novelqa"]
@@ -56,6 +63,8 @@ INPUT_PATH = CODE_DIR / "outputs" / "main_study" / "scored_cells.jsonl"
 OUT_DIR = CODE_DIR / "outputs" / "main_study"
 JSON_PATH = OUT_DIR / "significance.json"
 TEX_PATH = OUT_DIR / "significance_table.tex"
+EXPORT_DIR = OUT_DIR / "export"
+PAIRWISE_TEX_PATH = EXPORT_DIR / "mainstudy_significance.tex"
 
 # Expected point estimates used as a guard rail (QASPER mean F1 / NovelQA acc).
 # NovelQA values are over the held-out test pool (55 novels): the 4 calibration
@@ -195,6 +204,23 @@ def percentile_ci(samples, low=2.5, high=97.5):
     return float(np.percentile(samples, low)), float(np.percentile(samples, high))
 
 
+def holm_adjust(p_values):
+    """Holm-Bonferroni step-down adjusted p-values for one family of tests.
+
+    Sort the m raw p-values ascending, multiply the k-th smallest (k = 0-based
+    rank) by (m - k), enforce monotonicity with a running maximum, and clamp to
+    1. Returned in the input order.
+    """
+    m = len(p_values)
+    order = np.argsort(p_values, kind="stable")
+    adjusted = [0.0] * m
+    running_max = 0.0
+    for rank, idx in enumerate(order):
+        running_max = max(running_max, (m - rank) * p_values[idx])
+        adjusted[idx] = min(1.0, running_max)
+    return adjusted
+
+
 # --------------------------------------------------------------------------- #
 # Per-dataset computation
 # --------------------------------------------------------------------------- #
@@ -250,7 +276,17 @@ def compute_dataset(data, dataset):
             "ci_high": ci_high,
             "p_value": p_value,
             "significant": bool(p_value < 0.05),
+            # Tie rule used throughout the paper: a pair whose 95% CI includes
+            # zero is statistically tied.
+            "verdict": "tied" if ci_low <= 0.0 <= ci_high else "significant",
         })
+
+    # Holm-Bonferroni within this dataset's family of six pairwise tests. The
+    # raw two-sided bootstrap p stays reported; the adjusted p controls the
+    # family-wise error rate across the family.
+    for entry, p_holm in zip(pairwise, holm_adjust([p["p_value"] for p in pairwise])):
+        entry["p_holm"] = p_holm
+        entry["significant_holm"] = bool(p_holm < 0.05)
 
     return {"per_arch": per_arch, "pairwise": pairwise}
 
@@ -325,6 +361,95 @@ def write_latex(results):
 
 
 # --------------------------------------------------------------------------- #
+# Pairwise LaTeX table (paper export staging)
+# --------------------------------------------------------------------------- #
+
+DATASET_DISPLAY = {"qasper": "QASPER", "novelqa": "NovelQA"}
+DATASET_METRIC_HEADING = {"qasper": "QASPER (Answer-F1)", "novelqa": "NovelQA (accuracy)"}
+
+
+def fmt_p(pv):
+    return "$<0.001$" if pv < 0.001 else f"{pv:.3f}"
+
+
+def caption_dataset_sentence(results, dataset):
+    """One summary sentence per dataset, derived from the computed verdicts so
+    the caption cannot contradict (or go stale against) the rows below it."""
+    name = DATASET_DISPLAY[dataset]
+    tied = [p for p in results[dataset]["pairwise"] if p["verdict"] == "tied"]
+    if not tied:
+        return f"Every {name} pair is significant."
+    listing = " and ".join(
+        f"{ARCH_LABEL[p['a']]} versus {ARCH_LABEL[p['b']]} "
+        f"(${p['mean_diff']:+.3f}$, CI straddles zero)"
+        for p in tied
+    )
+    verb = "is" if len(tied) == 1 else "are"
+    return (f"On {name}, every pair is significant except {listing}, "
+            f"which {verb} statistically tied.")
+
+
+def caption_holm_sentence(results):
+    """Note any pair that is significant under the tie rule but does not
+    survive the within-dataset Holm correction; empty when none flips."""
+    flips = []
+    for ds in DATASETS:
+        for p in results[ds]["pairwise"]:
+            if p["verdict"] == "significant" and not p["significant_holm"]:
+                flips.append(
+                    f"{ARCH_LABEL[p['a']]} versus {ARCH_LABEL[p['b']]} "
+                    f"on {DATASET_DISPLAY[ds]}"
+                )
+    if not flips:
+        return ""
+    verb = "does" if len(flips) == 1 else "do"
+    return (f" Of the significant pairs, {' and '.join(flips)} {verb} not "
+            r"survive the Holm correction ($p_{\mathrm{Holm}} \ge 0.05$).")
+
+
+def write_pairwise_latex(results):
+    resamples_tex = f"{N_RESAMPLES:,}".replace(",", "{,}")
+    caption = (
+        f"Paired clustered-bootstrap significance (${resamples_tex}$ resamples; "
+        r"percentile $95\%$ CI on the mean difference; two-sided bootstrap $p$ "
+        r"with the Holm--Bonferroni adjusted $p_{\mathrm{Holm}}$ over the six "
+        "tests per dataset; clusters are papers for QASPER and novels for "
+        r"NovelQA). A pair whose $95\%$ CI includes zero is statistically tied. "
+        + " ".join(caption_dataset_sentence(results, ds) for ds in DATASETS)
+        + caption_holm_sentence(results)
+    )
+
+    lines = []
+    lines.append("% Auto-generated by code/scripts/significance_main_study.py from")
+    lines.append("% code/outputs/main_study/scored_cells.jsonl -- do not edit by hand.")
+    lines.append(r"\begin{table}[ht]")
+    lines.append(r"\centering")
+    lines.append(f"\\caption{{{caption}}}\\label{{tab:results-significance}}")
+    lines.append(r"{\footnotesize")
+    lines.append(r"\begin{tabular}{lrcccc}")
+    lines.append(r"\toprule")
+    lines.append(r"Pair & $\Delta$ mean & 95\% CI of $\Delta$ & $p$ & $p_{\mathrm{Holm}}$ & Verdict \\")
+    lines.append(r"\midrule")
+    for i, ds in enumerate(DATASETS):
+        if i:
+            lines.append(r"\midrule")
+        lines.append(f"\\multicolumn{{6}}{{l}}{{\\textit{{{DATASET_METRIC_HEADING[ds]}}}}} \\\\")
+        for p in results[ds]["pairwise"]:
+            lines.append(
+                f"{ARCH_LABEL[p['a']]} vs {ARCH_LABEL[p['b']]} & "
+                f"{p['mean_diff']:+.3f} & "
+                f"[{p['ci_low']:+.3f}, {p['ci_high']:+.3f}] & "
+                f"{fmt_p(p['p_value'])} & {fmt_p(p['p_holm'])} & {p['verdict']} \\\\"
+            )
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    lines.append(r"}")
+    lines.append(r"\end{table}")
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    PAIRWISE_TEX_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 
@@ -348,6 +473,7 @@ def main():
     }
     JSON_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     write_latex(results)
+    write_pairwise_latex(results)
 
     # Console summary.
     for ds in DATASETS:
@@ -359,14 +485,16 @@ def main():
                   f"n_q={e['n_questions']} n_clusters={e['n_clusters']}")
         print("  pairwise:")
         for p in results[ds]["pairwise"]:
-            tag = "SIG" if p["significant"] else "ns "
+            tag = "SIG" if p["verdict"] == "significant" else "ns "
             print(f"    [{tag}] {p['a']:10s} - {p['b']:10s} "
                   f"diff={p['mean_diff']:+.4f}  "
                   f"CI [{p['ci_low']:+.4f}, {p['ci_high']:+.4f}]  "
-                  f"p={p['p_value']:.4f}")
+                  f"p={p['p_value']:.4f}  p_holm={p['p_holm']:.4f}"
+                  f"{'' if p['significant_holm'] else '  (ns after Holm)'}")
 
     print(f"\nWrote {JSON_PATH}")
     print(f"Wrote {TEX_PATH}")
+    print(f"Wrote {PAIRWISE_TEX_PATH}")
 
 
 if __name__ == "__main__":

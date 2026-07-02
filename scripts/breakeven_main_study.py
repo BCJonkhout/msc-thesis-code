@@ -1,14 +1,13 @@
 """Main-study cost, break-even, and study-wide amortized cost, reconciled to the
 SAME post-exclusion evaluation pool the quality numbers use.
 
-Why reconciliation: the raw run ledger covers every answered cell (2,449 q / 309
-docs incl. 60 NovelQA novels). Quality, however, is scored on the post-exclusion
-test pool (2,303 q / 303 docs incl. 54 novels): the calibration / held-out novels
-are dropped so calibration data does not leak into the metric. Cost is therefore
-attributed per document/cell and restricted to the SAME pool, so the cost and
-quality sections agree. The excluded novels carried disproportionate build cost
-(one long novel, B42, alone accounted for ~$5.6 of GraphRAG's extraction), so the
-reconciliation is material, not cosmetic.
+Why reconciliation: the raw run ledger covers every answered cell. Quality,
+however, is scored on the post-exclusion test pool (2,336 q / 304 docs incl. 55
+novels): the calibration / held-out novels are dropped so calibration data does
+not leak into the metric. Cost is therefore attributed per document/cell and
+restricted to the SAME pool, so the cost and quality sections agree. The
+excluded novels carried disproportionate build cost, so the reconciliation is
+material, not cosmetic.
 
 Attribution: the ledger has no per-row document id, but predictions are written
 in execution order, so the i-th run-index-0 generate row of an architecture maps

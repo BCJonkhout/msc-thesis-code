@@ -1,7 +1,8 @@
 """Deterministic RQ2 error-slice analysis: where, and why, the summary-based
 architectures lose to full-context. NO model is in the loop -- every number is
-a census or a string match over the released predictions and the datasets' OWN
-labels, so the result is identical regardless of who runs it.
+a census, a string match, or a fixed-seed clustered bootstrap over the released
+predictions and the datasets' OWN labels, so the result is identical regardless
+of who runs it.
 
 Inputs (all released):
   outputs/main_study/scored_cells.jsonl              objective per-question scores
@@ -16,8 +17,14 @@ Outputs into outputs/main_study/:
 Outputs into outputs/main_study/export/ (promoted to thesis-msc/generated/):
   mainstudy_error_macros.tex     \\newcommand inline numbers used in prose
   mainstudy_error_examples.tex   verbatim worked examples (tab:results-error-examples)
-  mainstudy_error_appendix.tex   NovelQA per-aspect per-method accuracy (tab:error-novelqa)
-  mainstudy_error_qasper.tex     QASPER per-type per-method F1 (tab:error-qasper)
+  mainstudy_error_appendix.tex   NovelQA per-aspect per-method accuracy with per-slice n
+                                 and 95% clustered-bootstrap CIs (tab:error-novelqa)
+  mainstudy_error_qasper.tex     QASPER per-type per-method F1 with per-slice n
+                                 and 95% clustered-bootstrap CIs (tab:error-qasper)
+
+Uncertainty: percentile bootstrap, BOOT_RESAMPLES paired cluster resamples
+(cluster = novel for NovelQA, paper for QASPER), fixed per-slice seeds derived
+from BOOT_SEED so the output is byte-stable across runs and slice orderings.
 
 Losing slice (objective): flat correct AND raptor wrong AND graphrag wrong, with
 NovelQA correct=accuracy==1/wrong==0 and QASPER correct=F1>=0.5/wrong=F1<=0.15.
@@ -28,8 +35,11 @@ import ast
 import csv
 import hashlib
 import json
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 MS = ROOT / "outputs" / "main_study"
@@ -42,6 +52,8 @@ LABEL = {"flat": "Flat", "naive_rag": "Naive RAG", "raptor": "RAPTOR", "graphrag
 SUMMARY_ARCHS = ["raptor", "graphrag"]
 GRAN_BINS = [("gist", ["plot", "relat"]), ("mid", ["character", "settg"]),
              ("detail", ["meaning", "times", "span"])]
+BOOT_RESAMPLES = 10000
+BOOT_SEED = 20240613
 
 HEDGE_PHRASES = ["does not specify", "does not mention", "not specified", "not mentioned",
                  "provided text does not", "no information", "cannot be determined",
@@ -161,7 +173,8 @@ def main() -> None:
 
     eval_keys = sorted(k for k in metric if all(a in metric[k] for a in ARCH))
 
-    # per-method accuracy by aspect (NovelQA) / type (QASPER) and by granularity bin
+    # per-method accuracy by aspect (NovelQA) / type (QASPER) and by granularity bin;
+    # values are kept as (cluster, metric) pairs so the bootstrap can resample clusters
     acc_aspect = defaultdict(lambda: defaultdict(list))
     acc_qtype = defaultdict(lambda: defaultdict(list))
     acc_bin = defaultdict(lambda: defaultdict(list))
@@ -171,17 +184,49 @@ def main() -> None:
         if ds == "novelqa":
             a = nq.get((c, q), (None, None, {}))[0]
             for arch in ARCH:
-                acc_aspect[a][arch].append(metric[k][arch])
+                acc_aspect[a][arch].append((c, metric[k][arch]))
                 if a in asp_to_bin:
-                    acc_bin[asp_to_bin[a]][arch].append(metric[k][arch])
+                    acc_bin[asp_to_bin[a]][arch].append((c, metric[k][arch]))
         else:
             t = qtype.get(q, "unknown")
             for arch in ARCH:
-                acc_qtype[t][arch].append(metric[k][arch])
+                acc_qtype[t][arch].append((c, metric[k][arch]))
 
     def mean_by(d):
-        return {key: {a: sum(v[a]) / len(v[a]) for a in ARCH} for key, v in d.items() if v["flat"]}
+        return {key: {a: sum(x[1] for x in v[a]) / len(v[a]) for a in ARCH}
+                for key, v in d.items() if v["flat"]}
+
+    def n_by(d):
+        return {key: len(v["flat"]) for key, v in d.items() if v["flat"]}
+
+    def boot_ci(slice_rows, tag):
+        """95% percentile CI per method from a paired clustered bootstrap: resample
+        clusters (novels/papers) with replacement, same resample for all methods,
+        per-slice seed derived from BOOT_SEED + tag so output is order-independent."""
+        clusters = sorted({c for c, _ in slice_rows["flat"]})
+        cix = {c: i for i, c in enumerate(clusters)}
+        counts = np.zeros(len(clusters))
+        for c, _ in slice_rows["flat"]:
+            counts[cix[c]] += 1
+        rng = np.random.default_rng(
+            [BOOT_SEED, int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "big")])
+        idx = rng.integers(0, len(clusters), size=(BOOT_RESAMPLES, len(clusters)))
+        den = counts[idx].sum(axis=1)
+        out = {}
+        for a in ARCH:
+            sums = np.zeros(len(clusters))
+            for c, v in slice_rows[a]:
+                sums[cix[c]] += v
+            lo, hi = np.percentile(sums[idx].sum(axis=1) / den, [2.5, 97.5])
+            out[a] = (float(lo), float(hi))
+        return out
+
+    def ci_by(d, tag_prefix):
+        return {key: boot_ci(v, f"{tag_prefix}:{key}") for key, v in d.items() if v["flat"]}
+
     am, qm, bm = mean_by(acc_aspect), mean_by(acc_qtype), mean_by(acc_bin)
+    an, qn, bn = n_by(acc_aspect), n_by(acc_qtype), n_by(acc_bin)
+    aci, qci = ci_by(acc_aspect, "novelqa"), ci_by(acc_qtype, "qasper")
 
     def gap(row):
         return row["flat"] - min(row[a] for a in ["naive_rag", "raptor", "graphrag"])
@@ -226,6 +271,8 @@ def main() -> None:
     times_losing = [r for r in census if r["dataset"] == "novelqa" and r.get("aspect") == "times"]
     times_abs = [r for r in times_losing if r["absent_option_present"]]
     false_absent = {a: sum(1 for r in times_abs if r["answer"][a] in absent_letters(r["options"])) for a in ARCH}
+    false_absent_both = sum(1 for r in times_abs
+                            if all(r["answer"][a] in absent_letters(r["options"]) for a in SUMMARY_ARCHS))
 
     # deterministic example selection: abstraction-specific dissociation
     # (Flat correct AND Naive RAG correct AND both summary methods wrong),
@@ -267,15 +314,26 @@ def main() -> None:
                         "correct": {"novelqa": "accuracy==1", "qasper": "answer_f1>=0.5"},
                         "wrong": {"novelqa": "accuracy==0", "qasper": "answer_f1<=0.15"},
                         "hedge_phrases": HEDGE_PHRASES,
-                        "granularity_bins": {b: mem for b, mem in GRAN_BINS}},
+                        "granularity_bins": {b: mem for b, mem in GRAN_BINS},
+                        "bootstrap": {"resamples": BOOT_RESAMPLES, "seed": BOOT_SEED,
+                                      "interval": "95% percentile, paired cluster resample",
+                                      "cluster": {"novelqa": "novel", "qasper": "paper"}}},
         "totals_eval": dict(totals), "losing_slice_size": dict(losing),
         "abstraction_specific": dict(abstr_specific),
         "granularity_bin_means": bm,
+        "granularity_bin_n": bn,
         "granularity_bin_gaps": {b: round(gap(bm[b]), 4) for b in bm},
         "novelqa_accuracy_by_aspect": am,
+        "novelqa_aspect_n": an,
+        "novelqa_accuracy_by_aspect_ci95": {k: {a: [round(lo, 4), round(hi, 4)] for a, (lo, hi) in v.items()}
+                                            for k, v in aci.items()},
         "qasper_f1_by_type": qm,
+        "qasper_type_n": qn,
+        "qasper_f1_by_type_ci95": {k: {a: [round(lo, 4), round(hi, 4)] for a, (lo, hi) in v.items()}
+                                   for k, v in qci.items()},
         "tell1_hedge_on_flat_correct_concrete": {"base_n": len(flat_good), "hedges": hedge_flatgood},
-        "tell2_false_absent": {"times_with_absent_n": len(times_abs), "picks_absent": false_absent},
+        "tell2_false_absent": {"times_with_absent_n": len(times_abs), "picks_absent": false_absent,
+                               "picks_absent_both": false_absent_both},
         "selected_examples": {"novelqa": nq_ex, "qasper": qa_ex},
     }
     (MS / "error_slices_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -292,6 +350,12 @@ def main() -> None:
         f"\\newcommand{{\\errorFalseAbsentNum}}{{{fa}}}",
         f"\\newcommand{{\\errorFalseAbsentDen}}{{{len(times_abs)}}}",
         f"\\newcommand{{\\errorFalseAbsentPct}}{{{round(100*fa/max(1,len(times_abs)))}}}",
+        f"\\newcommand{{\\errorFalseAbsentRaptor}}{{{false_absent['raptor']}}}",
+        f"\\newcommand{{\\errorFalseAbsentGraph}}{{{false_absent['graphrag']}}}",
+        f"\\newcommand{{\\errorFalseAbsentBoth}}{{{false_absent_both}}}",
+        f"\\newcommand{{\\errorSliceNGist}}{{{bn['gist']}}}",
+        f"\\newcommand{{\\errorSliceNMid}}{{{bn['mid']}}}",
+        f"\\newcommand{{\\errorSliceNDetail}}{{{bn['detail']}}}",
         f"\\newcommand{{\\errorHedgeGraph}}{{{hedge_flatgood['graphrag']}}}",
         f"\\newcommand{{\\errorHedgeBase}}{{{len(flat_good)}}}",
         f"\\newcommand{{\\errorNovelLosing}}{{{losing['novelqa']}}}",
@@ -299,6 +363,17 @@ def main() -> None:
         f"\\newcommand{{\\errorAbstractionSpecific}}{{{abstr_specific['novelqa']}}}",
         f"\\newcommand{{\\errorQasperMaxGap}}{{{qmax:.2f}}}",
     ]
+    # \errorFalseAbsentNum predates the per-method split and is pinned to the
+    # RAPTOR count; guard it so a refactor cannot silently repoint the macro.
+    legacy = next(m for m in macros if m.startswith("\\newcommand{\\errorFalseAbsentNum}"))
+    assert legacy == f"\\newcommand{{\\errorFalseAbsentNum}}{{{false_absent['raptor']}}}", \
+        "legacy \\errorFalseAbsentNum must equal the RAPTOR false-absent count"
+    if false_absent["raptor"] != false_absent["graphrag"]:
+        print("WARNING: false-absent counts diverge: raptor "
+              f"{false_absent['raptor']} != graphrag {false_absent['graphrag']}. "
+              "Any prose citing one shared count (\\errorFalseAbsentNum) is now wrong; "
+              "use \\errorFalseAbsentRaptor / \\errorFalseAbsentGraph instead.",
+              file=sys.stderr)
     (EXPORT / "mainstudy_error_macros.tex").write_text("\n".join(macros) + "\n", encoding="utf-8")
 
     # ---- export: worked examples table ----
@@ -336,39 +411,50 @@ def main() -> None:
     (EXPORT / "mainstudy_error_examples.tex").write_text("\n".join(ex_lines), encoding="utf-8")
 
     # ---- export: appendix per-method tables ----
-    def acc_table(rows_means, order, name_map, caption, label):
+    def acc_table(rows_means, rows_n, rows_ci, order, name_map, caption, label):
         out = ["% Auto-generated by code/scripts/error_slice_analysis.py -- do not edit by hand.",
                "\\begin{table}[t]", "\\centering", f"\\caption{{{caption}}}\\label{{{label}}}",
-               "{\\footnotesize", "\\begin{tabular}{lrrrr}", "\\toprule",
-               "slice & Flat & Naive RAG & RAPTOR & GraphRAG \\\\", "\\midrule"]
+               "{\\footnotesize", "\\begin{tabular}{lrrrrr}", "\\toprule",
+               "slice & $n$ & Flat & Naive RAG & RAPTOR & GraphRAG \\\\", "\\midrule"]
         for key in order:
             if key not in rows_means:
                 continue
-            r = rows_means[key]
-            out.append(f"{name_map.get(key, key)} & " + " & ".join(f"{r[a]:.2f}" for a in ARCH) + " \\\\")
+            r, ci = rows_means[key], rows_ci[key]
+            out.append(f"{name_map.get(key, key)} & {rows_n[key]} & "
+                       + " & ".join(f"{r[a]:.2f}" for a in ARCH) + " \\\\")
+            out.append("& & " + " & ".join(f"{{\\scriptsize[{ci[a][0]:.2f}, {ci[a][1]:.2f}]}}"
+                                           for a in ARCH) + " \\\\[2pt]")
         out += ["\\bottomrule", "\\end{tabular}", "}", "\\end{table}", ""]
         return "\n".join(out)
 
+    boot_n_tex = f"{BOOT_RESAMPLES:,}".replace(",", "\\,")
+    ci_note = ("Brackets give 95\\% clustered-bootstrap confidence intervals "
+               f"(percentile method, {boot_n_tex} resamples, resampling {{cl}} with "
+               "replacement); $n$ is the number of questions in the slice.")
     (EXPORT / "mainstudy_error_appendix.tex").write_text(acc_table(
-        am, ["times", "meaning", "span", "character", "settg", "relat", "plot"],
+        am, an, aci, ["times", "meaning", "span", "character", "settg", "relat", "plot"],
         {"times": "Counting (\\texttt{times})", "meaning": "Paraphrase (\\texttt{meaning})",
          "span": "Span (\\texttt{span})", "character": "Character", "settg": "Setting",
          "relat": "Relational (\\texttt{relat})", "plot": "Plot"},
-        "NovelQA per-method accuracy by question aspect (full evaluation pool).",
+        "NovelQA per-method accuracy by question aspect (full evaluation pool). "
+        + ci_note.format(cl="novels"),
         "tab:error-novelqa"), encoding="utf-8")
     (EXPORT / "mainstudy_error_qasper.tex").write_text(acc_table(
-        qm, ["yes_no", "extractive", "abstractive", "unanswerable"],
+        qm, qn, qci, ["yes_no", "extractive", "abstractive", "unanswerable"],
         {"yes_no": "yes/no", "extractive": "extractive", "abstractive": "abstractive",
          "unanswerable": "unanswerable"},
         "QASPER per-method answer-F1 by answer type (full evaluation pool); gaps stay small "
-        "with no detail gradient, the negative control for the long-document penalty.",
+        "with no detail gradient, the negative control for the long-document penalty. "
+        + ci_note.format(cl="papers"),
         "tab:error-qasper"), encoding="utf-8")
 
     print(f"run: {run.name}")
     print(f"losing: novelqa {losing['novelqa']}/{totals['novelqa']}, qasper {losing['qasper']}/{totals['qasper']}; "
           f"abstraction-specific novelqa {abstr_specific['novelqa']}")
     print(f"gran gaps: gist {gist:.2f}, mid {mid:.2f}, detail {det:.2f}; qasper max gap {qmax:.2f}")
-    print(f"false-absent (of {len(times_abs)}): raptor {false_absent['raptor']}, graphrag {false_absent['graphrag']}")
+    print(f"gran bin n: gist {bn['gist']}, mid {bn['mid']}, detail {bn['detail']}")
+    print(f"false-absent (of {len(times_abs)}): raptor {false_absent['raptor']}, "
+          f"graphrag {false_absent['graphrag']}, both {false_absent_both}")
     print(f"hedge on {len(flat_good)} flat-good: " + ", ".join(f"{a} {hedge_flatgood[a]}" for a in ARCH))
     print(f"examples: novelqa {nq_ex} qasper {qa_ex}")
     print("wrote census/csv/summary + export macros/examples/appendix/qasper")
