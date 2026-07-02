@@ -393,11 +393,12 @@ def macros() -> None:
         f"\\newcommand{{\\nTotalQ}}{{{texint(QA['flat']['n_questions'] + NV['flat']['n_questions'])}}}",
         f"\\newcommand{{\\nTotalDocs}}{{{cost['n_docs']}}}",
         # measured document lengths (ledger full-context reads, scored cohort):
-        # NovelQA mean in kilotokens to the nearest 10, QASPER to the nearest 1,
-        # and their raw-mean ratio to the nearest 5.
+        # NovelQA mean in kilotokens to the nearest 10, QASPER to the nearest 1.
+        # The ratio derives from the displayed rounded values so the three
+        # numbers stay arithmetically consistent on the page.
         f"\\newcommand{{\\docTokensNovelK}}{{{round(dt['novelqa'] / 10000) * 10}}}",
         f"\\newcommand{{\\docTokensQasperK}}{{{round(dt['qasper'] / 1000)}}}",
-        f"\\newcommand{{\\docLenRatio}}{{{round(dt['novelqa'] / dt['qasper'] / 5) * 5}}}",
+        f"\\newcommand{{\\docLenRatio}}{{{round((round(dt['novelqa'] / 10000) * 10) / round(dt['qasper'] / 1000))}}}",
         f"\\newcommand{{\\repeatIdentityMinN}}{{{repeat_identity_min_novel():.1f}}}",
         f"\\newcommand{{\\storagePctFlat}}{{{storage_pct('flat')}}}",
         f"\\newcommand{{\\storagePctNaive}}{{{storage_pct('naive_rag')}}}",
