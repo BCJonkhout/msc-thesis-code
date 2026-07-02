@@ -58,9 +58,8 @@ def texint(n: int) -> str:
 
 def cost_table() -> None:
     def rows(ds):
-        order = sorted(ARCHS, key=lambda a: costds[f"base|{a}|{ds}"]["total"])
         out = []
-        for a in order:
+        for a in ARCHS:  # canonical order: Flat, Naive RAG, RAPTOR, GraphRAG
             c = costds[f"base|{a}|{ds}"]
             out.append(f"{LABEL[a]} & {c['c_off_total']:.2f} & {c['c_on_total']:.2f} & "
                        f"{c['total']:.2f} & {c['c_on_per_query']*1000:.2f} \\\\")
@@ -75,7 +74,7 @@ def cost_table() -> None:
 \caption{{Per-architecture deployment cost in USD, computed \emph{{within each workload}}
 (standard price card): $C_{{\text{{off}}}}$ the one-time build, $C_{{\text{{on}}}}$ the total
 answering cost, Deploy their sum, and the last column the marginal per-query cost
-(m\$, $10^{{-3}}$~USD). Naive RAG is cheapest and GraphRAG dearest on both, while
+(m\$, $10^{{-3}}$~USD). Naive RAG is cheapest and GraphRAG most expensive on both, while
 \emph{{Flat and RAPTOR swap}} between the short papers and the long novels
 (Section~\ref{{sec:results-cost}}). Study-wide deployment total: \${base_tot:.2f}
 (standard card) / \${cache_tot:.2f} (deep-cache card, which lowers only Flat's
@@ -102,9 +101,8 @@ def cost_decomposition_table() -> None:
     # vs the per-query answering, each split into LLM API calls and local bge-m3
     # embedding. Standard card; a study-wide roll-up (summed over both workloads ---
     # the per-workload split is in cost_table). Driven from cost_per_arch.json.
-    order = sorted(ARCHS, key=lambda a: PC[f"base|{a}"]["total"])
     rows = []
-    for a in order:
+    for a in ARCHS:  # canonical order: Flat, Naive RAG, RAPTOR, GraphRAG
         b = PC[f"base|{a}"]
         rows.append(
             f"{LABEL[a]} & {b['gemini_off']:.2f} & {b['embed_off']:.2f} & "
