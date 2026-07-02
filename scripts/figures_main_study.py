@@ -22,6 +22,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.ticker import ScalarFormatter, NullFormatter
 
 ROOT = Path(__file__).resolve().parents[1]
 MS = ROOT / "outputs" / "main_study"
@@ -86,33 +87,42 @@ def fig_pareto() -> None:
     """Cost (log x) vs quality (y), one panel per dataset. Cost is computed PER WORKLOAD,
     so each architecture sits at its own cost on each panel (the pooled total blended the two
     ~25x-different workloads). Frontier highlighted."""
-    fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.0))
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.2))
+    # Per-architecture label offsets (in points) keep the close QASPER Naive/Flat pair
+    # from colliding; dominated methods are shown by hollow markers + the legend, so no
+    # inline "(dominated)" tags are needed. Clean per-panel x-ticks (plain numbers).
+    LP = {"flat": (5, 6, "left", "bottom"), "naive_rag": (-5, -6, "right", "top"),
+          "raptor": (0, -9, "center", "top"), "graphrag": (0, -9, "center", "top")}
+    TICKS = {"qasper": [0.3, 0.5, 1, 2, 3], "novelqa": [0.3, 1, 3, 10, 30]}
+    sf = ScalarFormatter(); sf.set_scientific(False)
     for ax, ds in zip(axes, ("qasper", "novelqa")):
         cst = COST_DS[ds]
         # frontier line: the non-dominated set, sorted by cost (naive_rag -> flat)
         front = sorted(FRONTIER, key=lambda a: cst[a])
         ax.plot([cst[a] for a in front], [QUAL[ds][a][0] for a in front],
-                "-", color="0.55", lw=1.3, zorder=1, label="Pareto frontier")
+                "-", color="0.6", lw=1.1, zorder=1)
         for a in ARCHS:
             m, lo, hi = QUAL[ds][a]
             ax.errorbar(cst[a], m, yerr=[[m - lo], [hi - m]], elinewidth=1.1,
                         capsize=2.5, ecolor=COLOR[a], color=COLOR[a], zorder=2,
                         linestyle="none", markersize=8, **_marker_kw(a))
-            dom = "" if a in FRONTIER else "  (dominated)"
-            va, dy = ("bottom", 1.012) if a != "raptor" else ("top", 0.988)
-            ax.annotate(f"{LABEL[a]}{dom}", (cst[a], m * dy),
-                        fontsize=8.2, ha="center", va=va, color=COLOR[a])
+            ox, oy, ha, va = LP[a]
+            ax.annotate(LABEL[a], (cst[a], m), xytext=(ox, oy), textcoords="offset points",
+                        ha=ha, va=va, fontsize=8.4, color=COLOR[a])
         ax.set_xscale("log")
+        ax.set_xticks(TICKS[ds])
+        ax.xaxis.set_major_formatter(sf)
+        ax.xaxis.set_minor_formatter(NullFormatter())
         ax.set_xlabel("Deployment cost (USD, log scale)")
         ax.set_ylabel(DS_TITLE[ds])
         ax.set_title(DS_SHORT[ds], fontsize=10)
-        ax.margins(y=0.18)
-    handles = [Line2D([0], [0], color="0.55", lw=1.3, label="Pareto frontier"),
+        ax.margins(x=0.20, y=0.22)
+    handles = [Line2D([0], [0], color="0.6", lw=1.1, label="Pareto frontier"),
                Line2D([0], [0], marker="o", color="0.3", linestyle="none",
                       markerfacecolor="0.3", label="on frontier"),
                Line2D([0], [0], marker="^", color="0.3", linestyle="none",
                       markerfacecolor="white", markeredgecolor="0.3", label="dominated")]
-    fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.04))
+    fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.02))
     fig.suptitle("Cost–quality Pareto (per workload): frontier = {Flat, Naive RAG}; RAPTOR and GraphRAG dominated",
                  fontsize=11, y=1.02)
     fig.tight_layout()
