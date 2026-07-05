@@ -18,7 +18,10 @@ Outputs into outputs/main_study/export/ (promoted to thesis-msc/generated/):
   mainstudy_error_macros.tex     \\newcommand inline numbers used in prose
   mainstudy_error_examples.tex   verbatim worked examples (tab:results-error-examples)
   mainstudy_error_appendix.tex   NovelQA per-aspect per-method accuracy with per-slice n
-                                 and 95% clustered-bootstrap CIs (tab:error-novelqa)
+                                 and 95% clustered-bootstrap CIs (tab:error-novelqa),
+                                 plus the same table over NovelQA's own Complexity labels
+                                 (sh/mh/dtl) as a grouping-free check
+                                 (tab:error-novelqa-complexity)
   mainstudy_error_qasper.tex     QASPER per-type per-method F1 with per-slice n
                                  and 95% clustered-bootstrap CIs (tab:error-qasper)
 
@@ -178,15 +181,18 @@ def main() -> None:
     acc_aspect = defaultdict(lambda: defaultdict(list))
     acc_qtype = defaultdict(lambda: defaultdict(list))
     acc_bin = defaultdict(lambda: defaultdict(list))
+    acc_cx = defaultdict(lambda: defaultdict(list))
     asp_to_bin = {a: b for b, members in GRAN_BINS for a in members}
     for k in eval_keys:
         ds, c, q = k
         if ds == "novelqa":
-            a = nq.get((c, q), (None, None, {}))[0]
+            a, cx, _ = nq.get((c, q), (None, None, {}))
             for arch in ARCH:
                 acc_aspect[a][arch].append((c, metric[k][arch]))
                 if a in asp_to_bin:
                     acc_bin[asp_to_bin[a]][arch].append((c, metric[k][arch]))
+                if cx is not None:
+                    acc_cx[cx][arch].append((c, metric[k][arch]))
         else:
             t = qtype.get(q, "unknown")
             for arch in ARCH:
@@ -224,12 +230,62 @@ def main() -> None:
     def ci_by(d, tag_prefix):
         return {key: boot_ci(v, f"{tag_prefix}:{key}") for key, v in d.items() if v["flat"]}
 
+    def boot_gap_diff(rows_a, rows_b, tag):
+        """95% percentile CI for gap(bucket a) - gap(bucket b), gap = flat mean minus
+        the worst (min) of the other three method means. Same paired clustered
+        machinery as boot_ci: ONE shared novel-cluster resample (union of the two
+        buckets' clusters) reused across both buckets and all four methods, and the
+        per-bucket gap is recomputed inside every resample before differencing."""
+        clusters = sorted({c for c, _ in rows_a["flat"]} | {c for c, _ in rows_b["flat"]})
+        cix = {c: i for i, c in enumerate(clusters)}
+        rng = np.random.default_rng(
+            [BOOT_SEED, int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "big")])
+        idx = rng.integers(0, len(clusters), size=(BOOT_RESAMPLES, len(clusters)))
+
+        def bucket_means(rows):
+            counts = np.zeros(len(clusters))
+            for c, _ in rows["flat"]:
+                counts[cix[c]] += 1
+            den = counts[idx].sum(axis=1)
+            assert (den > 0).all(), f"empty bucket in a bootstrap resample ({tag})"
+            means = {}
+            for a in ARCH:
+                sums = np.zeros(len(clusters))
+                for c, v in rows[a]:
+                    sums[cix[c]] += v
+                means[a] = sums[idx].sum(axis=1) / den
+            return means
+
+        ma, mb = bucket_means(rows_a), bucket_means(rows_b)
+        ga = ma["flat"] - np.minimum.reduce([ma[a] for a in ["naive_rag", "raptor", "graphrag"]])
+        gb = mb["flat"] - np.minimum.reduce([mb[a] for a in ["naive_rag", "raptor", "graphrag"]])
+        lo, hi = np.percentile(ga - gb, [2.5, 97.5])
+        return float(lo), float(hi)
+
     am, qm, bm = mean_by(acc_aspect), mean_by(acc_qtype), mean_by(acc_bin)
     an, qn, bn = n_by(acc_aspect), n_by(acc_qtype), n_by(acc_bin)
     aci, qci = ci_by(acc_aspect, "novelqa"), ci_by(acc_qtype, "qasper")
+    cxm, cxn = mean_by(acc_cx), n_by(acc_cx)
+    cxci = ci_by(acc_cx, "novelqa-complexity")
 
     def gap(row):
         return row["flat"] - min(row[a] for a in ["naive_rag", "raptor", "graphrag"])
+
+    # gap-difference point estimates + paired clustered-bootstrap CIs
+    gapdiff = {
+        "complexity_dtl_minus_sh": (gap(cxm["dtl"]) - gap(cxm["sh"]),
+                                    boot_gap_diff(acc_cx["dtl"], acc_cx["sh"],
+                                                  "gapdiff:complexity:dtl-sh")),
+        "granularity_detail_minus_gist": (gap(bm["detail"]) - gap(bm["gist"]),
+                                          boot_gap_diff(acc_bin["detail"], acc_bin["gist"],
+                                                        "gapdiff:gran:detail-gist")),
+        "granularity_mid_minus_gist": (gap(bm["mid"]) - gap(bm["gist"]),
+                                       boot_gap_diff(acc_bin["mid"], acc_bin["gist"],
+                                                     "gapdiff:gran:mid-gist")),
+        "granularity_detail_minus_mid": (gap(bm["detail"]) - gap(bm["mid"]),
+                                         boot_gap_diff(acc_bin["detail"], acc_bin["mid"],
+                                                       "gapdiff:gran:detail-mid")),
+    }
 
     # census of the losing slice
     census, totals, losing, abstr_specific = [], Counter(), Counter(), Counter()
@@ -274,6 +330,27 @@ def main() -> None:
     false_absent_both = sum(1 for r in times_abs
                             if all(r["answer"][a] in absent_letters(r["options"]) for a in SUMMARY_ARCHS))
 
+    # Tell 2, full denominator: ALL scored `times` questions offering an absent
+    # option whose gold answer is a present option and Flat answers correctly
+    # (Flat correct implies its letter IS the gold letter) -- not restricted to
+    # the losing slice. Counts how often each method picks an absent option.
+    fa_all_den, fa_all = 0, Counter()
+    for k in eval_keys:
+        ds, c, q = k
+        if ds != "novelqa":
+            continue
+        asp, _, opts = nq.get((c, q), (None, None, {}))
+        if asp != "times":
+            continue
+        ab = absent_letters(opts)
+        if not ab or not is_correct(ds, metric[k]["flat"]):
+            continue
+        if ans(ds, c, q, "flat") in ab:   # gold must be a present option
+            continue
+        fa_all_den += 1
+        for a in ARCH:
+            fa_all[a] += int(ans(ds, c, q, a) in ab)
+
     # deterministic example selection: abstraction-specific dissociation
     # (Flat correct AND Naive RAG correct AND both summary methods wrong),
     # so the table shows the loss is the tree/graph abstraction, not retrieval.
@@ -315,6 +392,21 @@ def main() -> None:
                         "wrong": {"novelqa": "accuracy==0", "qasper": "answer_f1<=0.15"},
                         "hedge_phrases": HEDGE_PHRASES,
                         "granularity_bins": {b: mem for b, mem in GRAN_BINS},
+                        "complexity_labels": {"sh": "single-hop", "mh": "multi-hop",
+                                              "dtl": "detail",
+                                              "source": "data/novelqa/questions.jsonl Complexity field, "
+                                                        "joined per question like Aspect"},
+                        "gap": "flat mean minus min(naive_rag, raptor, graphrag) mean on the slice",
+                        "gap_difference_bootstrap": "gap(bucket a) - gap(bucket b): ONE shared paired "
+                                                    "novel-cluster resample (union of both buckets' "
+                                                    "clusters, same resamples/seed policy as the "
+                                                    "per-slice CIs) reused across buckets and methods; "
+                                                    "the per-bucket gap is recomputed inside every "
+                                                    "resample before differencing",
+                        "false_absent_full_pool": "all scored NovelQA `times` questions offering an "
+                                                  "absent option (absent_letters rule) whose gold "
+                                                  "answer is a present option and Flat is correct; "
+                                                  "NOT restricted to the losing slice",
                         "bootstrap": {"resamples": BOOT_RESAMPLES, "seed": BOOT_SEED,
                                       "interval": "95% percentile, paired cluster resample",
                                       "cluster": {"novelqa": "novel", "qasper": "paper"}}},
@@ -327,6 +419,13 @@ def main() -> None:
         "novelqa_aspect_n": an,
         "novelqa_accuracy_by_aspect_ci95": {k: {a: [round(lo, 4), round(hi, 4)] for a, (lo, hi) in v.items()}
                                             for k, v in aci.items()},
+        "novelqa_accuracy_by_complexity": cxm,
+        "novelqa_complexity_n": cxn,
+        "novelqa_accuracy_by_complexity_ci95": {k: {a: [round(lo, 4), round(hi, 4)] for a, (lo, hi) in v.items()}
+                                                for k, v in cxci.items()},
+        "novelqa_complexity_gaps": {k: round(gap(cxm[k]), 4) for k in cxm},
+        "gap_difference_ci95": {name: {"diff": round(d, 4), "ci95": [round(lo, 4), round(hi, 4)]}
+                                for name, (d, (lo, hi)) in gapdiff.items()},
         "qasper_f1_by_type": qm,
         "qasper_type_n": qn,
         "qasper_f1_by_type_ci95": {k: {a: [round(lo, 4), round(hi, 4)] for a, (lo, hi) in v.items()}
@@ -334,6 +433,8 @@ def main() -> None:
         "tell1_hedge_on_flat_correct_concrete": {"base_n": len(flat_good), "hedges": hedge_flatgood},
         "tell2_false_absent": {"times_with_absent_n": len(times_abs), "picks_absent": false_absent,
                                "picks_absent_both": false_absent_both},
+        "tell2_false_absent_full_pool": {"den": fa_all_den,
+                                         "picks_absent": {a: fa_all[a] for a in ARCH}},
         "selected_examples": {"novelqa": nq_ex, "qasper": qa_ex},
     }
     (MS / "error_slices_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -361,7 +462,33 @@ def main() -> None:
         f"\\newcommand{{\\errorNovelLosing}}{{{losing['novelqa']}}}",
         f"\\newcommand{{\\errorNovelTotal}}{{{totals['novelqa']}}}",
         f"\\newcommand{{\\errorAbstractionSpecific}}{{{abstr_specific['novelqa']}}}",
-        f"\\newcommand{{\\errorQasperMaxGap}}{{{qmax:.2f}}}",
+        # 3dp: the value sits near 0.10, where 2dp rounding erases the margin.
+        f"\\newcommand{{\\errorQasperMaxGap}}{{{qmax:.3f}}}",
+        f"\\newcommand{{\\errorSliceNSh}}{{{cxn['sh']}}}",
+        f"\\newcommand{{\\errorSliceNMh}}{{{cxn['mh']}}}",
+        f"\\newcommand{{\\errorSliceNDtl}}{{{cxn['dtl']}}}",
+        f"\\newcommand{{\\errorGapSh}}{{{gap(cxm['sh']):.2f}}}",
+        f"\\newcommand{{\\errorGapMh}}{{{gap(cxm['mh']):.2f}}}",
+        f"\\newcommand{{\\errorGapDtl}}{{{gap(cxm['dtl']):.2f}}}",
+        f"\\newcommand{{\\errorGapDtlShDiff}}{{{gapdiff['complexity_dtl_minus_sh'][0]:+.2f}}}",
+        f"\\newcommand{{\\errorGapDtlShCI}}{{[{gapdiff['complexity_dtl_minus_sh'][1][0]:+.2f}, "
+        f"{gapdiff['complexity_dtl_minus_sh'][1][1]:+.2f}]}}",
+        f"\\newcommand{{\\errorGapDetailGistDiff}}{{{gapdiff['granularity_detail_minus_gist'][0]:+.2f}}}",
+        f"\\newcommand{{\\errorGapDetailGistCI}}{{[{gapdiff['granularity_detail_minus_gist'][1][0]:+.2f}, "
+        f"{gapdiff['granularity_detail_minus_gist'][1][1]:+.2f}]}}",
+        f"\\newcommand{{\\errorGapMidGistDiff}}{{{gapdiff['granularity_mid_minus_gist'][0]:+.2f}}}",
+        f"\\newcommand{{\\errorGapMidGistCI}}{{[{gapdiff['granularity_mid_minus_gist'][1][0]:+.2f}, "
+        f"{gapdiff['granularity_mid_minus_gist'][1][1]:+.2f}]}}",
+        f"\\newcommand{{\\errorGapDetailMidDiff}}{{{gapdiff['granularity_detail_minus_mid'][0]:+.2f}}}",
+        f"\\newcommand{{\\errorGapDetailMidCI}}{{[{gapdiff['granularity_detail_minus_mid'][1][0]:+.2f}, "
+        f"{gapdiff['granularity_detail_minus_mid'][1][1]:+.2f}]}}",
+        f"\\newcommand{{\\errorFalseAbsentAllDen}}{{{fa_all_den}}}",
+        f"\\newcommand{{\\errorFalseAbsentAllFlat}}{{{fa_all['flat']}}}",
+        f"\\newcommand{{\\errorFalseAbsentAllNaive}}{{{fa_all['naive_rag']}}}",
+        f"\\newcommand{{\\errorFalseAbsentAllRaptor}}{{{fa_all['raptor']}}}",
+        f"\\newcommand{{\\errorFalseAbsentAllGraph}}{{{fa_all['graphrag']}}}",
+        f"\\newcommand{{\\errorHedgeNaive}}{{{hedge_flatgood['naive_rag']}}}",
+        f"\\newcommand{{\\errorHedgeRaptor}}{{{hedge_flatgood['raptor']}}}",
     ]
     # \errorFalseAbsentNum predates the per-method split and is pinned to the
     # RAPTOR count; guard it so a refactor cannot silently repoint the macro.
@@ -411,9 +538,10 @@ def main() -> None:
     (EXPORT / "mainstudy_error_examples.tex").write_text("\n".join(ex_lines), encoding="utf-8")
 
     # ---- export: appendix per-method tables ----
-    def acc_table(rows_means, rows_n, rows_ci, order, name_map, caption, label):
-        out = ["% Auto-generated by code/scripts/error_slice_analysis.py -- do not edit by hand.",
-               "\\begin{table}[t]", "\\centering", f"\\caption{{{caption}}}\\label{{{label}}}",
+    def acc_table(rows_means, rows_n, rows_ci, order, name_map, caption, label, comment=True):
+        out = (["% Auto-generated by code/scripts/error_slice_analysis.py -- do not edit by hand."]
+               if comment else [])
+        out += ["\\begin{table}[t]", "\\centering", f"\\caption{{{caption}}}\\label{{{label}}}",
                "{\\footnotesize", "\\begin{tabular}{lrrrrr}", "\\toprule",
                "slice & $n$ & Flat & Naive RAG & RAPTOR & GraphRAG \\\\", "\\midrule"]
         for key in order:
@@ -431,30 +559,51 @@ def main() -> None:
     ci_note = ("Brackets give 95\\% clustered-bootstrap confidence intervals "
                f"(percentile method, {boot_n_tex} resamples, resampling {{cl}} with "
                "replacement); $n$ is the number of questions in the slice.")
-    (EXPORT / "mainstudy_error_appendix.tex").write_text(acc_table(
+    aspect_tex = acc_table(
         am, an, aci, ["times", "meaning", "span", "character", "settg", "relat", "plot"],
         {"times": "Counting (\\texttt{times})", "meaning": "Paraphrase (\\texttt{meaning})",
          "span": "Span (\\texttt{span})", "character": "Character", "settg": "Setting",
          "relat": "Relational (\\texttt{relat})", "plot": "Plot"},
         "NovelQA per-method accuracy by question aspect (full evaluation pool). "
         + ci_note.format(cl="novels"),
-        "tab:error-novelqa"), encoding="utf-8")
+        "tab:error-novelqa")
+    complexity_tex = acc_table(
+        cxm, cxn, cxci, ["sh", "mh", "dtl"],
+        {"sh": "Single-hop (\\texttt{sh})", "mh": "Multi-hop (\\texttt{mh})",
+         "dtl": "Detail (\\texttt{dtl})"},
+        "NovelQA per-method accuracy by the dataset's own complexity labels "
+        "(single-hop, multi-hop, detail), a grouping-free check on the granularity "
+        "analysis: the labels ship with NovelQA rather than coming from our "
+        "aspect-to-granularity binning. Same CI method as "
+        "Table~\\ref{tab:error-novelqa}; $n$ is the number of questions in the slice.",
+        "tab:error-novelqa-complexity", comment=False)
+    (EXPORT / "mainstudy_error_appendix.tex").write_text(
+        aspect_tex + "\n" + complexity_tex, encoding="utf-8")
     (EXPORT / "mainstudy_error_qasper.tex").write_text(acc_table(
         qm, qn, qci, ["yes_no", "extractive", "abstractive", "unanswerable"],
         {"yes_no": "yes/no", "extractive": "extractive", "abstractive": "abstractive",
          "unanswerable": "unanswerable"},
-        "QASPER per-method answer-F1 by answer type (full evaluation pool); gaps stay small "
-        "with no detail gradient, the negative control for the long-document penalty. "
+        "QASPER per-method answer-F1 by answer type (full evaluation pool); gaps stay small, "
+        "with no analogue of the NovelQA granularity widening: the short-document "
+        "negative control. "
         + ci_note.format(cl="papers"),
         "tab:error-qasper"), encoding="utf-8")
 
     print(f"run: {run.name}")
     print(f"losing: novelqa {losing['novelqa']}/{totals['novelqa']}, qasper {losing['qasper']}/{totals['qasper']}; "
           f"abstraction-specific novelqa {abstr_specific['novelqa']}")
-    print(f"gran gaps: gist {gist:.2f}, mid {mid:.2f}, detail {det:.2f}; qasper max gap {qmax:.2f}")
+    print(f"gran gaps: gist {gist:.2f}, mid {mid:.2f}, detail {det:.2f}; qasper max gap {qmax:.3f}")
     print(f"gran bin n: gist {bn['gist']}, mid {bn['mid']}, detail {bn['detail']}")
+    print("complexity means: " + "; ".join(
+        f"{k} (n={cxn[k]}) " + " ".join(f"{LABEL[a]} {cxm[k][a]:.3f}" for a in ARCH)
+        for k in ["sh", "mh", "dtl"]))
+    print("complexity gaps: " + ", ".join(f"{k} {gap(cxm[k]):.2f}" for k in ["sh", "mh", "dtl"]))
+    print("gap diffs: " + "; ".join(
+        f"{name} {d:+.2f} [{lo:+.2f}, {hi:+.2f}]" for name, (d, (lo, hi)) in gapdiff.items()))
     print(f"false-absent (of {len(times_abs)}): raptor {false_absent['raptor']}, "
           f"graphrag {false_absent['graphrag']}, both {false_absent_both}")
+    print(f"false-absent full pool (of {fa_all_den}): " +
+          ", ".join(f"{a} {fa_all[a]}" for a in ARCH))
     print(f"hedge on {len(flat_good)} flat-good: " + ", ".join(f"{a} {hedge_flatgood[a]}" for a in ARCH))
     print(f"examples: novelqa {nq_ex} qasper {qa_ex}")
     print("wrote census/csv/summary + export macros/examples/appendix/qasper")
