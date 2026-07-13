@@ -37,15 +37,15 @@ naive_rag:
 
 raptor:
   retrieval_k:
-    value: 10
+    value: 20
     source: lit:sarthi2024raptor
     rationale: >
       Sarthi et al. 2024 § 4 reports "approximately top-20 nodes
       within a 2000-token budget" for collapsed-tree retrieval at
-      inference; the budget cap dominates so the integer-k value
-      is operating-point-dependent. Our code uses k=10 with the
-      2000-token retrieval budget, which selects roughly the
-      paper's stable point on QASPER-scale documents.
+      inference. Run at k=20 in top_k selection mode with the
+      2000-token cap (raptor.py _RAPTOR_DEFAULTS): the budget cap
+      dominates, and a smaller k under-fills the budget relative
+      to the other retrieval arms.
   retrieval_max_tokens:
     value: 2000
     source: lit:sarthi2024raptor
@@ -74,8 +74,14 @@ raptor:
       Reported in the original paper as the stronger default vs
       tree-traversal across their experimental settings.
   clustering_seed:
-    value: 42
-    source: rule:seed-42-everywhere
+    value: 224
+    source: lit:sarthi2024raptor
+    rationale: >
+      Reference-repo default (third_party/raptor/cluster_utils.py
+      RANDOM_SEED = 224, governing UMAP random_state and the numpy
+      seed). Re-exported as CLUSTERING_SEED in raptor.py so the
+      preprocessing cache key binds to the value that actually
+      governs tree determinism.
 
 graphrag:
   # The pilot uses a from-scratch faithful implementation of
@@ -104,20 +110,36 @@ graphrag:
       hierarchical-community ablation is added to the optional
       grid.
     seed:
-      value: 42
-      source: rule:seed-42-everywhere
+      value: 3735928559  # 0xDEADBEEF
+      source: rule:from-scratch-implementation-step3
+      rationale: >
+        Code constant _COMMUNITY_SEED in graphrag.py; the
+        preprocessing cache key binds to it, so it is recorded
+        here verbatim rather than folded into the seed-42 rule.
   local_search_top_k_entities:
-    value: 8
+    value: 10
     source: lit:edge2024local
     rationale: >
-      Edge et al. 2024 § 4 local-search default for entity
-      retrieval at query time.
-  local_search_top_k_reports:
-    value: 3
+      Microsoft graphrag LocalSearchDefaults.top_k_mapped_entities;
+      mirrored as _TOP_K_ENTITIES in graphrag.py.
+  local_search_top_k_relationships:
+    value: 10
     source: lit:edge2024local
     rationale: >
-      Edge et al. 2024 § 4 local-search default for community-report
-      retrieval at query time.
+      Microsoft graphrag LocalSearchDefaults.top_k_relationships;
+      mirrored as _TOP_K_RELATIONSHIPS in graphrag.py. Community
+      reports and source text units are not selected by a separate
+      top-k: they are packed greedily into the context budget below
+      (community / text-unit proportions 0.15 / 0.50).
+  local_search_context_budget_tokens:
+    value: 8000
+    source: lit:edge2024local
+    rationale: >
+      Microsoft default is 12,000 max_context_tokens; reduced to
+      8,000 to bound prompt cost while still fitting the selected
+      entities, relationships, reports, and text units (community
+      reports run 5-15k tokens after chunking, so the budget, not
+      a report top-k, is the binding constraint).
   entity_extraction_prompt:
     value: microsoft_graphrag_default
     source: lit:edge2024local
