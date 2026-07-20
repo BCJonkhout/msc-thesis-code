@@ -32,11 +32,14 @@ ARCH = ["flat", "naive_rag", "raptor", "graphrag"]
 LBL = {"flat": "Flat", "naive_rag": "Naive RAG", "raptor": "RAPTOR", "graphrag": "GraphRAG"}
 COL = {"flat": "#0072B2", "naive_rag": "#009E73", "raptor": "#E69F00", "graphrag": "#D55E00"}
 
-# granularity bins (gist -> fine detail), by what each NovelQA aspect demands
+# granularity bins (gist -> fine detail), by what each NovelQA aspect demands;
+# tier labels match the prose tiers (gist / mid-level / fine-grained detail) and
+# sublabels use aspect display names, not raw keys (relat -> relational,
+# meaning -> paraphrase, times -> counting)
 BINS = [
-    ("Gist & relational\n(plot, relat)", ["plot", "relat"]),
-    ("Entity & scene facts\n(character, setting)", ["character", "settg"]),
-    ("Fine-grained detail\n(meaning, counting, span)", ["meaning", "times", "span"]),
+    ("Gist\n(plot, relational)", ["plot", "relat"]),
+    ("Mid-level\n(character, setting)", ["character", "settg"]),
+    ("Fine-grained detail\n(paraphrase, counting, span)", ["meaning", "times", "span"]),
 ]
 
 

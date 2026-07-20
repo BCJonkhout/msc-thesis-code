@@ -7,7 +7,7 @@ Outputs into code/outputs/main_study/export/ (the staging dir promoted to
 thesis-msc/generated/ by make export-assets):
   mainstudy_cost.tex         -> tab:results-cost-quality (deployment cost, both cards)
   mainstudy_cost_decomposition.tex -> tab:results-cost-decomp (build/answer x LLM/embed)
-  mainstudy_breakeven.tex    -> tab:results-breakeven    (break-even N* per doc)
+  mainstudy_breakeven.tex    -> tab:results-breakeven    (break-even n* per document)
 (mainstudy_significance.tex is owned by significance_main_study.py, which emits the
 Holm-adjusted six-pair table; this script no longer writes it.)
 The three figure PDFs/PNGs are also copied in with stable paper names.
@@ -72,21 +72,16 @@ def cost_table() -> None:
 
     qd = brk_ds["base|raptor|qasper"]["density"]
     nd = brk_ds["base|raptor|novelqa"]["density"]
-    base_tot = cost["deployment_total"]["base"]
-    cache_tot = cost["deployment_total"]["cache"]
     body = rf"""\begin{{table}}[ht]
 \centering
-\caption{{Per-architecture deployment cost in USD, computed \emph{{within each workload}}
-(standard price card): $C_{{\text{{off}}}}$ the one-time build, $C_{{\text{{on}}}}$ the total
-answering cost, Deploy their sum, and the last column the marginal per-query cost
-(m\$, $10^{{-3}}$~USD). Naive RAG is cheapest and GraphRAG most expensive on both, while
-\emph{{Flat and RAPTOR swap}} between the short papers and the long novels
-(Section~\ref{{sec:results-cost}}). Study-wide deployment total: \${base_tot:.2f}
-(standard card) / \${cache_tot:.2f} (deep-cache card, which lowers only Flat's
-re-reads).}}\label{{tab:results-cost-quality}}
+\caption{{Per-architecture deployment cost in USD, computed \emph{{within each dataset}}
+(standard card): the one-time build cost (the per-document $C_{{\text{{build}}}}$ summed
+over the dataset's documents), the answering cost summed over its queries, their sum
+(Deploy), and the marginal per-query answering cost $C_{{\text{{query}}}}$
+(m\$, $10^{{-3}}$~USD).}}\label{{tab:results-cost-quality}}
 \begin{{tabular}}{{lrrrr}}
 \toprule
- & $C_{{\text{{off}}}}$ & $C_{{\text{{on}}}}$ & Deploy & $C_{{\text{{on}}}}$/query \\
+ & Build & Answer & Deploy & $C_{{\text{{query}}}}$ \\
 Architecture & (USD) & (USD) & (USD) & (m\$) \\
 \midrule
 \multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ q/paper)}} \\
@@ -101,11 +96,23 @@ Architecture & (USD) & (USD) & (USD) & (m\$) \\
     write("mainstudy_cost.tex", body)
 
 
+def flat_cached_split() -> tuple[float, float]:
+    """Split Flat's standard-card answering total into the cached re-reads and the
+    undiscounted remainder. The cache-discount card prices cached input at 0.1x
+    uncached vs the standard card's 0.25x (a 0.4x factor), so the standard-to-
+    discount saving is 0.6x of the cached re-read cost; invert it to recover the
+    cached re-reads under the standard card and the undiscounted remainder
+    (uncached first read of each document plus all output)."""
+    f_base, f_cache = PC["base|flat"]["total"], PC["cache|flat"]["total"]
+    cached_base = (f_base - f_cache) / 0.6
+    return cached_base, f_base - cached_base
+
+
 def cost_decomposition_table() -> None:
     # Where each architecture's deployment dollars actually go: the one-time build
-    # vs the per-query answering, each split into LLM API calls and local bge-m3
-    # embedding. Standard card; a study-wide roll-up (summed over both workloads ---
-    # the per-workload split is in cost_table). Driven from cost_per_arch.json.
+    # vs the answering, each split into LLM API calls and local BGE-M3 embedding.
+    # Standard card; a study-wide roll-up (summed over both datasets --- the
+    # per-dataset split is in cost_table). Driven from cost_per_arch.json.
     rows = []
     for a in ARCHS:  # canonical order: Flat, Naive RAG, RAPTOR, GraphRAG
         b = PC[f"base|{a}"]
@@ -114,32 +121,18 @@ def cost_decomposition_table() -> None:
             f"{b['gemini_on']:.2f} & {b['embed_on']:.2f} & {b['total']:.2f} & "
             f"{b['c_store_total']:.3f} \\\\")
     rows_tex = "\n".join(rows)
-    gr, rp = PC["base|graphrag"], PC["base|raptor"]
-    f_base, f_cache = PC["base|flat"]["total"], PC["cache|flat"]["total"]
-    # Deep-cache prices cached input at 0.1x uncached vs the standard card's 0.25x
-    # (a 0.4x factor), so the standard->deep saving is 0.6x of the cached re-read
-    # cost; invert it to recover the cached re-reads under the standard card and
-    # the undiscounted remainder (uncached first read + output).
-    cached_base = (f_base - f_cache) / 0.6
-    other = f_base - cached_base
     body = rf"""\begin{{table}}[ht]
 \centering
 \caption{{Where each architecture's deployment dollars go, summed over the whole study
-(standard card; the per-workload split is Table~\ref{{tab:results-cost-quality}}): the one-time
-build ($C_{{\text{{off}}}}$) and the per-query answering ($C_{{\text{{on}}}}$), each split
-into LLM API calls and local \texttt{{bge-m3}} embedding. Persistent-artifact storage
+(standard card; the per-dataset split is Table~\ref{{tab:results-cost-quality}}): the
+one-time build cost (the per-document $C_{{\text{{build}}}}$ summed over all documents)
+and the answering cost (the per-query $C_{{\text{{query}}}}$ summed over all queries),
+each split into LLM API calls and local BGE-M3 embedding. Persistent-artifact storage
 ($C_{{\text{{store}}}}$) is shown separately---it folds into the study-wide amortized
-cost, not the deployment total. All values in USD. Build cost is dominated by LLM
-calls: GraphRAG's entity and community extraction (\${gr['gemini_off']:.2f}) and
-RAPTOR's tree summarization (\${rp['gemini_off']:.2f}); embedding is a minor line
-except RAPTOR's per-node tree vectors (\${rp['embed_off']:.2f}). Flat carries no
-build and no embedding---its \${f_base:.2f} is entirely answering API, of which about
-\${cached_base:.2f} is the cached re-reads the deep-cache card reprices and
-\${other:.2f} is the uncached first read of each document plus all output, which no
-cache discount touches.}}\label{{tab:results-cost-decomp}}
+cost, not the deployment total. All values in USD.}}\label{{tab:results-cost-decomp}}
 \begin{{tabular}}{{lrrrrrr}}
 \toprule
- & \multicolumn{{2}}{{c}}{{Build ($C_{{\text{{off}}}}$)}} & \multicolumn{{2}}{{c}}{{Answer ($C_{{\text{{on}}}}$)}} & & \\
+ & \multicolumn{{2}}{{c}}{{Build}} & \multicolumn{{2}}{{c}}{{Answer}} & & \\
 \cmidrule(lr){{2-3}}\cmidrule(lr){{4-5}}
 Architecture & LLM & embed & LLM & embed & Deploy & Storage \\
  & (USD) & (USD) & (USD) & (USD) & (USD) & (USD) \\
@@ -157,7 +150,7 @@ def breakeven_table() -> None:
         n = b["n_star"]
         if n is None:
             return "never"
-        return "any $N\\ge1$" if n < 1 else f"{n:.1f}"
+        return "any $n\\ge1$" if n < 1 else f"{n:.1f}"
 
     def rows(ds):
         out = []
@@ -172,34 +165,22 @@ def breakeven_table() -> None:
 
     qd = brk_ds["base|raptor|qasper"]["density"]
     nd = brk_ds["base|raptor|novelqa"]["density"]
-    qr = brk_ds["base|raptor|qasper"]["n_star"]
-    nr = brk_ds["base|raptor|novelqa"]["n_star"]
-    ng = brk_ds["base|graphrag|novelqa"]["n_star"]
     body = rf"""\begin{{table}}[ht]
 \centering
 \caption{{Break-even query density versus cache-aware Flat, computed \emph{{within each
-workload}}: the per-document build cost and Flat's per-query cost both scale with document
-length, so a single pooled threshold describes neither. A structured architecture amortizes
-its per-document build $C_{{\text{{off}}}}/\text{{doc}}$ over $N$ queries; $N^\star$ is the
-questions-per-document density at which its amortized cost per query drops below Flat's
-marginal. Naive RAG is cheaper than Flat at any density on both workloads. On QASPER
-($\approx{qd:.0f}$ q/paper) neither structured method repays: RAPTOR needs
-$N^\star\approx{qr:.0f}$, above the density, and GraphRAG \emph{{never}} breaks even because
-its per-query cost already exceeds Flat's re-read of the short paper. On NovelQA
-($\approx{nd:.0f}$ q/novel) RAPTOR repays under the standard card ($N^\star\approx{nr:.0f}$)
-but not under the cache-discount card, while GraphRAG needs $\approx{ng:.0f}$ q/novel, far
-above the workload. Even where a build is recovered the method answers no better than Flat and
-Naive RAG stays cheaper, so break-even never becomes a quality or cost-position
-advantage.}}\label{{tab:results-breakeven}}
+dataset}}. An architecture's one-time per-document build cost $C_{{\text{{build}}}}$
+amortizes over $n$ questions per document, and $n^\star$ is the density at which its
+amortized cost per query drops below Flat's marginal per-query cost, reported under the
+standard card and the cache-discount card.}}\label{{tab:results-breakeven}}
 \begin{{tabular}}{{lrrcc}}
 \toprule
- & $C_{{\text{{off}}}}$/doc & $C_{{\text{{on}}}}$/query & $N^\star$ & $N^\star$ \\
-Architecture & (m\$) & (m\$) & std & cache \\
+ & $C_{{\text{{build}}}}$ & $C_{{\text{{query}}}}$ & $n^\star$ & $n^\star$ \\
+Architecture & (m\$) & (m\$) & standard & cache-disc. \\
 \midrule
-\multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ q/paper; Flat {flatq('qasper','base'):.2f}/{flatq('qasper','cache'):.2f}~m\$/q std/cache)}} \\
+\multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ q/paper; Flat {flatq('qasper','base'):.2f}/{flatq('qasper','cache'):.2f}~m\$/q standard/cache-discount)}} \\
 {rows('qasper')}
 \midrule
-\multicolumn{{5}}{{l}}{{\textit{{NovelQA}} ($\approx{nd:.0f}$ q/novel; Flat {flatq('novelqa','base'):.2f}/{flatq('novelqa','cache'):.2f}~m\$/q std/cache)}} \\
+\multicolumn{{5}}{{l}}{{\textit{{NovelQA}} ($\approx{nd:.0f}$ q/novel; Flat {flatq('novelqa','base'):.2f}/{flatq('novelqa','cache'):.2f}~m\$/q standard/cache-discount)}} \\
 {rows('novelqa')}
 \bottomrule
 \end{{tabular}}
@@ -220,18 +201,10 @@ def memorization_table() -> None:
     rows_tex = "\n".join(rows)
     body = rf"""\begin{{table}}[ht]
 \centering
-\caption{{Memorization control: per-architecture answer quality against the
-closed-book floor (the document \emph{{withheld}}; question, and options for NovelQA).
-NovelQA's public-domain classics are recalled well above the $0.25$ four-way-MC
-chance rate---closed-book accuracy is already {nv_floor:.2f}---so its absolute
-scores are memorization-inflated, whereas QASPER's research papers are not recalled
-(closed-book Answer-F1 {qa_floor:.2f}) and require the document. The reading lift
-(with-document minus closed-book) measures the usable evidence each architecture
-supplies: Flat lifts NovelQA accuracy by ${nv['per_arch']['flat']['lift']:+.2f}$,
-whereas GraphRAG adds almost nothing (${nv['per_arch']['graphrag']['lift']:+.2f}$)
-over closed-book guessing. The same architecture ranking is reproduced on the
-low-recall QASPER workload, so the comparative finding does not rest on
-memorized recall.}}\label{{tab:results-memorization}}
+\caption{{Closed-book control: per-architecture answer quality against the closed-book
+floor (the document is withheld; the model receives only the question, plus the answer
+options for NovelQA). The lift column is the with-document score minus the closed-book
+floor.}}\label{{tab:results-memorization}}
 \begin{{tabular}}{{lcccc}}
 \toprule
  & \multicolumn{{2}}{{c}}{{QASPER Answer-F1}} & \multicolumn{{2}}{{c}}{{NovelQA accuracy}} \\
@@ -372,6 +345,15 @@ def macros() -> None:
         f"\\newcommand{{\\costRaptorQ}}{{{costds['base|raptor|qasper']['total']:.2f}}}",
         f"\\newcommand{{\\costFlatN}}{{{costds['base|flat|novelqa']['total']:.2f}}}",
         f"\\newcommand{{\\costRaptorN}}{{{costds['base|raptor|novelqa']['total']:.2f}}}",
+        # study-wide deployment totals under the two price cards
+        f"\\newcommand{{\\studyTotalStandardCard}}{{{cost['deployment_total']['base']:.2f}}}",
+        f"\\newcommand{{\\studyTotalCacheDiscountCard}}{{{cost['deployment_total']['cache']:.2f}}}",
+        # Flat's standard-card answering total, split into the cached re-reads
+        # (the part the cache-discount card reprices) and the undiscounted
+        # remainder (uncached first read of each document plus all output); see
+        # flat_cached_split() for the inversion.
+        f"\\newcommand{{\\flatCachedReReads}}{{{flat_cached_split()[0]:.2f}}}",
+        f"\\newcommand{{\\flatUncachedFirstRead}}{{{flat_cached_split()[1]:.2f}}}",
         f"\\newcommand{{\\nstarRaptorQ}}{{{round(brk_ds['base|raptor|qasper']['n_star'])}}}",
         f"\\newcommand{{\\nstarRaptorN}}{{{round(brk_ds['base|raptor|novelqa']['n_star'])}}}",
         f"\\newcommand{{\\nstarRaptorNcache}}{{{round(brk_ds['cache|raptor|novelqa']['n_star'])}}}",
@@ -449,10 +431,7 @@ Pairs with \(\tau_b \leq 0\) (rank-disagreement) & {nv['le0']} / {nv['n']} & {qa
 \caption{{Distribution of pairwise Kendall \(\tau_b\) across the {nv['n']} pilot
 candidate-pairs on each dataset under gold scoring.
 Statistics use 10{{,}}000 bootstrap resamples and permutation shuffles
-with add-one smoothing~\cite{{dror2018hitchhiker}}.
-The within-dataset medians informed the single-answerer design;
-they are a pilot diagnostic, superseded by the main study's clustered
-bootstrap (Figure~\ref{{fig:per-arch-accuracy}}).}}
+with add-one smoothing~\cite{{dror2018hitchhiker}}.}}
 \label{{tab:results-tau}}
 \end{{table}}
 """

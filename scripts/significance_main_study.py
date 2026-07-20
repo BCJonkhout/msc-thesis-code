@@ -364,7 +364,6 @@ def write_latex(results):
 # Pairwise LaTeX table (paper export staging)
 # --------------------------------------------------------------------------- #
 
-DATASET_DISPLAY = {"qasper": "QASPER", "novelqa": "NovelQA"}
 DATASET_METRIC_HEADING = {"qasper": "QASPER (Answer-F1)", "novelqa": "NovelQA (accuracy)"}
 
 
@@ -372,51 +371,16 @@ def fmt_p(pv):
     return "$<0.001$" if pv < 0.001 else f"{pv:.3f}"
 
 
-def caption_dataset_sentence(results, dataset):
-    """One summary sentence per dataset, derived from the computed verdicts so
-    the caption cannot contradict (or go stale against) the rows below it."""
-    name = DATASET_DISPLAY[dataset]
-    tied = [p for p in results[dataset]["pairwise"] if p["verdict"] == "tied"]
-    if not tied:
-        return f"Every {name} pair is significant."
-    listing = " and ".join(
-        f"{ARCH_LABEL[p['a']]} versus {ARCH_LABEL[p['b']]} "
-        f"(${p['mean_diff']:+.3f}$, CI straddles zero)"
-        for p in tied
-    )
-    verb = "is" if len(tied) == 1 else "are"
-    return (f"On {name}, every pair is significant except {listing}, "
-            f"which {verb} statistically tied.")
-
-
-def caption_holm_sentence(results):
-    """Note any pair that is significant under the tie rule but does not
-    survive the within-dataset Holm correction; empty when none flips."""
-    flips = []
-    for ds in DATASETS:
-        for p in results[ds]["pairwise"]:
-            if p["verdict"] == "significant" and not p["significant_holm"]:
-                flips.append(
-                    f"{ARCH_LABEL[p['a']]} versus {ARCH_LABEL[p['b']]} "
-                    f"on {DATASET_DISPLAY[ds]}"
-                )
-    if not flips:
-        return ""
-    verb = "does" if len(flips) == 1 else "do"
-    return (f" Of the significant pairs, {' and '.join(flips)} {verb} not "
-            r"survive the Holm correction ($p_{\mathrm{Holm}} \ge 0.05$).")
-
-
 def write_pairwise_latex(results):
+    # Caption describes method and keys only (resamples, CI type, Holm family,
+    # cluster unit, tie rule); which pairs are significant is body-text analysis.
     resamples_tex = f"{N_RESAMPLES:,}".replace(",", "{,}")
     caption = (
         f"Paired clustered-bootstrap significance (${resamples_tex}$ resamples; "
         r"percentile $95\%$ CI on the mean difference; two-sided bootstrap $p$ "
         r"with the Holm--Bonferroni adjusted $p_{\mathrm{Holm}}$ over the six "
         "tests per dataset; clusters are papers for QASPER and novels for "
-        r"NovelQA). A pair whose $95\%$ CI includes zero is statistically tied. "
-        + " ".join(caption_dataset_sentence(results, ds) for ds in DATASETS)
-        + caption_holm_sentence(results)
+        r"NovelQA). A pair whose $95\%$ CI includes zero is statistically tied."
     )
 
     lines = []

@@ -1,17 +1,22 @@
 """Paper-ready figures for the main study, all driven from the on-disk analysis
 JSONs (no hardcoded metrics): significance.json (quality + clustered-bootstrap
-CIs), cost_per_arch.json (deployment cost), breakeven.json (amortised curves).
+CIs), cost_per_arch.json (deployment cost), breakeven.json (amortized curves).
 
 Emits vector PDF (for \\input into the paper via generated/) plus PNG previews
 into code/outputs/main_study/figures/:
   - pareto_cost_quality.pdf : deployment cost vs quality, both datasets, frontier
   - accuracy_by_arch.pdf    : per-arch quality with 95% clustered-bootstrap CIs
-  - breakeven_curves.pdf    : amortised cost/query vs questions-per-document
+                              and the dashed closed-book floor per panel
+  - breakeven_curves.pdf    : amortized cost/query vs questions-per-document
   - cost_composition.pdf    : where cost comes from -- build + per-query, by source
 
 A consistent architecture colour/marker scheme is shared across all three so the
 figures read as a set. Frontier architectures (flat, naive_rag) get filled
 markers; dominated ones (raptor, graphrag) get hollow markers + an x.
+
+No figure bakes a suptitle or verdict panel title into the PDF: captions in the
+paper describe, and analysis lives in body text (same describe-only rule as the
+generated table captions).
 """
 from __future__ import annotations
 
@@ -62,10 +67,12 @@ QUAL = {  # dataset -> arch -> (mean, lo, hi)
 }
 TOTAL = {a: cost["per_arch"][f"base|{a}"]["total"] for a in ARCHS}          # deployment USD (pooled)
 costds = json.loads((MS / "cost_by_dataset.json").read_text(encoding="utf-8"))
-COST_DS = {ds: {a: costds[f"base|{a}|{ds}"]["total"] for a in ARCHS}         # per-workload deployment USD
+COST_DS = {ds: {a: costds[f"base|{a}|{ds}"]["total"] for a in ARCHS}         # per-dataset deployment USD
            for ds in ("qasper", "novelqa")}
 FLOOR = {ds: mem[ds]["closed_book"] for ds in ("qasper", "novelqa")}        # no-document floor
-DS_TITLE = {"qasper": "QASPER (Answer-F1)", "novelqa": "NovelQA (accuracy)"}
+# Panel titles carry the dataset name; y-axis labels carry only the metric, so
+# the name never appears twice on one panel.
+DS_METRIC = {"qasper": "Answer-F1", "novelqa": "accuracy"}
 DS_SHORT = {"qasper": "QASPER", "novelqa": "NovelQA"}
 
 
@@ -84,9 +91,9 @@ def _marker_kw(a: str) -> dict:
 
 
 def fig_pareto() -> None:
-    """Cost (log x) vs quality (y), one panel per dataset. Cost is computed PER WORKLOAD,
+    """Cost (log x) vs quality (y), one panel per dataset. Cost is computed PER DATASET,
     so each architecture sits at its own cost on each panel (the pooled total blended the two
-    ~25x-different workloads). Frontier highlighted."""
+    ~25x-different datasets). Frontier highlighted."""
     fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.2))
     # Per-architecture label offsets (in points) keep the close QASPER Naive/Flat pair
     # from colliding; dominated methods are shown by hollow markers + the legend, so no
@@ -114,7 +121,7 @@ def fig_pareto() -> None:
         ax.xaxis.set_major_formatter(sf)
         ax.xaxis.set_minor_formatter(NullFormatter())
         ax.set_xlabel("Deployment cost (USD, log scale)")
-        ax.set_ylabel(DS_TITLE[ds])
+        ax.set_ylabel(DS_METRIC[ds])
         ax.set_title(DS_SHORT[ds], fontsize=10)
         ax.margins(x=0.20, y=0.22)
     handles = [Line2D([0], [0], color="0.6", lw=1.1, label="Pareto frontier"),
@@ -122,15 +129,15 @@ def fig_pareto() -> None:
                       markerfacecolor="0.3", label="on frontier"),
                Line2D([0], [0], marker="^", color="0.3", linestyle="none",
                       markerfacecolor="white", markeredgecolor="0.3", label="dominated")]
-    fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.02))
-    fig.suptitle("Cost–quality Pareto (per workload): frontier = {Flat, Naive RAG}; RAPTOR and GraphRAG dominated",
-                 fontsize=11, y=1.02)
+    fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.08))
     fig.tight_layout()
     _save(fig, "pareto_cost_quality")
 
 
 def fig_accuracy() -> None:
-    """Grouped bars per dataset with 95% clustered-bootstrap CI whiskers."""
+    """Grouped bars per dataset with 95% clustered-bootstrap CI whiskers, plus a
+    dashed closed-book floor line per panel (the no-document score, read from
+    memorization_control.json). The bars themselves are unchanged."""
     fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.0))
     for ax, ds in zip(axes, ("qasper", "novelqa")):
         for i, a in enumerate(ARCHS):
@@ -140,31 +147,39 @@ def fig_accuracy() -> None:
                    error_kw=dict(elinewidth=1.2, ecolor="0.2"))
             ax.text(i, hi + (0.012 if ds == "qasper" else 0.018), f"{m:.3f}",
                     ha="center", va="bottom", fontsize=8.4)
+        floor = FLOOR[ds]
+        ax.axhline(floor, color="0.3", ls="--", lw=1.1, zorder=3)
+        # small right-edge label; x in axes fraction so it hugs the edge
+        ax.text(0.985, floor, "closed-book floor",
+                transform=ax.get_yaxis_transform(), ha="right",
+                va="bottom" if ds == "qasper" else "top",
+                fontsize=7.4, color="0.3",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=1.2))
         ax.set_xticks(range(len(ARCHS)))
         ax.set_xticklabels([LABEL[a] for a in ARCHS], fontsize=9)
-        ax.set_ylabel(DS_TITLE[ds])
+        ax.set_ylabel(DS_METRIC[ds])
         ax.set_title(DS_SHORT[ds], fontsize=10)
         top = max(QUAL[ds][a][2] for a in ARCHS)
         ax.set_ylim(0, top * 1.16)
-    fig.suptitle("Per-architecture mean quality with 95% clustered-bootstrap confidence intervals",
-                 fontsize=10.5, y=1.01)
     fig.tight_layout()
     _save(fig, "accuracy_by_arch")
 
 
 def fig_breakeven() -> None:
-    """Amortised deployment cost per query vs questions-per-document, computed PER
-    WORKLOAD. Build cost and Flat's per-query cost both scale with document length, so
-    the two workloads have different break-even geometry and are shown as separate panels
-    (a single pooled crossing describes neither)."""
+    """Amortized deployment cost per query vs questions-per-document (n), computed
+    PER DATASET. Build cost and Flat's per-query cost both scale with document
+    length, so the two datasets have different break-even geometry and are shown as
+    separate panels (a single pooled crossing describes neither)."""
     fig, axes = plt.subplots(1, 2, figsize=(9.8, 4.4))
     panels = [("qasper", "QASPER", 15, 4), ("novelqa", "NovelQA", 80, 25)]
     for ax, (ds, name, xmax, dens) in zip(axes, panels):
         flat_q = brk_ds[f"base|raptor|{ds}"]["flat_c_on_per_query"]
         flat_qc = brk_ds[f"cache|raptor|{ds}"]["flat_c_on_per_query"]
         Ns = [1 + (xmax - 1) * i / 160 for i in range(161)]
-        ax.axhline(flat_q, color=COLOR["flat"], lw=2.0, label=f"Flat, std (${flat_q*1000:.2f}m/q)")
-        ax.axhline(flat_qc, color=COLOR["flat"], lw=1.5, ls="--", label=f"Flat, cache (${flat_qc*1000:.2f}m/q)")
+        ax.axhline(flat_q, color=COLOR["flat"], lw=2.0,
+                   label=f"Flat — standard card (${flat_q*1000:.2f}m/q)")
+        ax.axhline(flat_qc, color=COLOR["flat"], lw=1.5, ls="--",
+                   label=f"Flat — cache-discount card (${flat_qc*1000:.2f}m/q)")
         for a in ("naive_rag", "raptor", "graphrag"):
             b = brk_ds[f"base|{a}|{ds}"]
             coff, onq, nstar = b["c_off_per_doc"], b["c_on_per_query"], b["n_star"]
@@ -172,7 +187,7 @@ def fig_breakeven() -> None:
             if nstar and 1 <= nstar <= xmax:  # standard-card crossing within range
                 yat = coff / nstar + onq
                 ax.plot([nstar], [yat], "o", color=COLOR[a], markersize=6, zorder=5)
-                ax.annotate(f"$N^*\\approx{nstar:.0f}$", (nstar, yat), fontsize=8.2,
+                ax.annotate(f"$n^\\star\\approx{nstar:.0f}$", (nstar, yat), fontsize=8.2,
                             color=COLOR[a], xytext=(5, 5), textcoords="offset points")
         ax.axvline(dens, color="0.55", ls=":", lw=1.1)
         ax.set_yscale("log")
@@ -180,13 +195,11 @@ def fig_breakeven() -> None:
         _, ymax = ax.get_ylim()
         ax.text(dens, ymax * 0.85, f"  {name} $\\approx{dens}$ q/doc",
                 rotation=90, va="top", ha="left", fontsize=7.4, color="0.35")
-        ax.set_xlabel("Questions per document $N$")
+        ax.set_xlabel("Questions per document $n$")
         ax.set_title(name, fontsize=10.5)
         ax.legend(loc="upper right", fontsize=7.4)
-    axes[0].set_ylabel("Amortised cost per query (USD, log scale)")
-    fig.suptitle("Break-even vs Flat, per workload: structured builds pay back only above $N^\\star$",
-                 fontsize=10.5)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    axes[0].set_ylabel("Amortized cost per query (USD, log scale)")
+    fig.tight_layout()
     _save(fig, "breakeven_curves")
 
 
@@ -197,9 +210,12 @@ def fig_memorization() -> None:
     CIs; the floor is a dashed line across each panel and the band below it is
     shaded as the recall region. This figure exists to show how much of each score
     is just the floor, so the axis is not zoomed: on NovelQA most of the bar lies
-    below the floor (memorised recall) and only Flat rises clearly above it, while
+    below the floor (memorized recall) and only Flat rises clearly above it, while
     on QASPER the floor is low so the bars are chiefly reading-derived. The shared
-    zero baseline keeps the two panels visually comparable."""
+    zero baseline keeps the two panels visually comparable.
+
+    Retained for completeness; the paper's Figure 3 now carries the floor line
+    instead of a separate floor figure."""
     fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.2))
     for ax, ds in zip(axes, ("qasper", "novelqa")):
         floor = FLOOR[ds]
@@ -220,10 +236,8 @@ def fig_memorization() -> None:
         ax.set_xticks(range(len(ARCHS)))
         ax.set_xticklabels([LABEL[a] for a in ARCHS], fontsize=9)
         ax.set_xlim(-0.5, 3.5)
-        ax.set_ylabel(DS_TITLE[ds])
+        ax.set_ylabel(DS_METRIC[ds])
         ax.set_title(DS_SHORT[ds], fontsize=10)
-    fig.suptitle("Answer quality against the closed-book floor (bars from zero; shaded band = memorised-recall floor)",
-                 fontsize=9.8, y=1.02)
     fig.tight_layout()
     _save(fig, "memorization_floor")
 
@@ -256,8 +270,8 @@ def fig_cost_composition() -> None:
         tot = PCB[f"base|{a}"]["c_off_total"]
         axB.text(i, tot, f"${tot:.2f}", ha="center", va="bottom", fontsize=8.2)
     axB.set_xticks(x); axB.set_xticklabels(xl, fontsize=9)
-    axB.set_ylabel(r"One-time build cost $C_{\mathrm{off}}$ (USD)")
-    axB.set_title("(a) Build: one-time dollars, almost all LLM calls", fontsize=9.4, pad=8)
+    axB.set_ylabel(r"One-time build cost $C_{\mathrm{build}}$ (USD)")
+    axB.set_title("(a)", fontsize=9.4, pad=8)
     axB.legend(fontsize=7.4, loc="upper left")
     axB.set_ylim(0, max(PCB[f"base|{a}"]["c_off_total"] for a in ARCHS) * 1.22)
 
@@ -276,14 +290,11 @@ def fig_cost_composition() -> None:
         tot = PCB[f"base|{a}"]["c_on_per_query"] * 1000
         axQ.text(i, tot, f"{tot:.2f}", ha="center", va="bottom", fontsize=8.2)
     axQ.set_xticks(x); axQ.set_xticklabels(xl, fontsize=9)
-    axQ.set_ylabel(r"Per-query answering cost $C_{\mathrm{on}}$ (milli-USD)")
-    axQ.set_title("(b) Per query: only Flat lights the cached counter", fontsize=9.4, pad=8)
+    axQ.set_ylabel(r"Per-query answering cost $C_{\mathrm{query}}$ (milli-USD)")
+    axQ.set_title("(b)", fontsize=9.4, pad=8)
     axQ.legend(fontsize=7.4, loc="upper right")
     axQ.set_ylim(0, max(PCB[f"base|{a}"]["c_on_per_query"] for a in ARCHS) * 1000 * 1.27)
 
-    fig.suptitle("Where each architecture's cost comes from (standard card): "
-                 "structured methods pay to build, Flat pays to re-read",
-                 fontsize=10.3, y=1.02)
     fig.tight_layout()
     _save(fig, "cost_composition")
 
