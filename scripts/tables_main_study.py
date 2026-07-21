@@ -77,7 +77,9 @@ def cost_table() -> None:
 \caption{{Per-architecture deployment cost in USD, computed \emph{{within each dataset}}
 (standard card): the one-time build cost (the per-document $C_{{\text{{build}}}}$ summed
 over the dataset's documents), the answering cost summed over its queries, their sum
-(Total), and the marginal per-query answering cost $C_{{\text{{query}}}}$
+(Total)---the total deployment spend, i.e.\ the numerator of
+$\bar{{C}}_{{\text{{deploy}}}}$ before amortizing over the query count---and the
+marginal per-query answering cost $C_{{\text{{query}}}}$
 (m\$, $10^{{-3}}$~USD).}}\label{{tab:results-cost-quality}}
 \begin{{tabular}}{{lrrrr}}
 \toprule
