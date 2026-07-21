@@ -193,7 +193,7 @@ def fig_breakeven() -> None:
         ax.set_yscale("log")
         ax.set_xlim(1, xmax)
         _, ymax = ax.get_ylim()
-        ax.text(dens, ymax * 0.85, f"  {name} $\\approx{dens}$ q/doc",
+        ax.text(dens, ymax * 0.85, f"  {name} $\\approx{dens}$ questions/doc",
                 rotation=90, va="top", ha="left", fontsize=7.4, color="0.35")
         ax.set_xlabel("Questions per document $n$")
         ax.set_title(name, fontsize=10.5)

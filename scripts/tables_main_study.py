@@ -84,10 +84,10 @@ over the dataset's documents), the answering cost summed over its queries, their
  & Build & Answer & Deploy & $C_{{\text{{query}}}}$ \\
 Architecture & (USD) & (USD) & (USD) & (m\$) \\
 \midrule
-\multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ q/paper)}} \\
+\multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ questions/paper)}} \\
 {rows('qasper')}
 \midrule
-\multicolumn{{5}}{{l}}{{\textit{{NovelQA}} ($\approx{nd:.0f}$ q/novel)}} \\
+\multicolumn{{5}}{{l}}{{\textit{{NovelQA}} ($\approx{nd:.0f}$ questions/novel)}} \\
 {rows('novelqa')}
 \bottomrule
 \end{{tabular}}
@@ -167,20 +167,20 @@ def breakeven_table() -> None:
     nd = brk_ds["base|raptor|novelqa"]["density"]
     body = rf"""\begin{{table}}[ht]
 \centering
-\caption{{Break-even query density versus cache-aware Flat, computed \emph{{within each
+\caption{{Break-even density versus cache-aware Flat, computed \emph{{within each
 dataset}}. An architecture's one-time per-document build cost $C_{{\text{{build}}}}$
-amortizes over $n$ questions per document, and $n^\star$ is the density at which its
-amortized cost per query drops below Flat's marginal per-query cost, reported under the
+amortizes over $n$ questions per document; the two $n^\star$ columns give the
+break-even density (Section~3.4) under the
 standard card and the cache-discount card.}}\label{{tab:results-breakeven}}
 \begin{{tabular}}{{lrrcc}}
 \toprule
  & $C_{{\text{{build}}}}$ & $C_{{\text{{query}}}}$ & $n^\star$ & $n^\star$ \\
-Architecture & (m\$) & (m\$) & standard & cache-disc. \\
+Architecture & (m\$) & (m\$) & standard card & cache-discount card \\
 \midrule
-\multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ q/paper; Flat {flatq('qasper','base'):.2f}/{flatq('qasper','cache'):.2f}~m\$/q standard/cache-discount)}} \\
+\multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ questions/paper; Flat {flatq('qasper','base'):.2f}/{flatq('qasper','cache'):.2f}~m\$/q standard/cache-discount)}} \\
 {rows('qasper')}
 \midrule
-\multicolumn{{5}}{{l}}{{\textit{{NovelQA}} ($\approx{nd:.0f}$ q/novel; Flat {flatq('novelqa','base'):.2f}/{flatq('novelqa','cache'):.2f}~m\$/q standard/cache-discount)}} \\
+\multicolumn{{5}}{{l}}{{\textit{{NovelQA}} ($\approx{nd:.0f}$ questions/novel; Flat {flatq('novelqa','base'):.2f}/{flatq('novelqa','cache'):.2f}~m\$/q standard/cache-discount)}} \\
 {rows('novelqa')}
 \bottomrule
 \end{{tabular}}
@@ -202,8 +202,7 @@ def memorization_table() -> None:
     body = rf"""\begin{{table}}[ht]
 \centering
 \caption{{Closed-book control: per-architecture answer quality against the closed-book
-floor (the document is withheld; the model receives only the question, plus the answer
-options for NovelQA). The lift column is the with-document score minus the closed-book
+floor (the same questions asked with the document withheld; Section~4.5). The lift column is the with-document score minus the closed-book
 floor.}}\label{{tab:results-memorization}}
 \begin{{tabular}}{{lcccc}}
 \toprule
@@ -428,7 +427,7 @@ Pairs with \(\tau_b \geq 2/3\)              & {nv['ge23']} / {nv['n']} & {qa['ge
 Pairs with \(\tau_b \leq 0\) (rank-disagreement) & {nv['le0']} / {nv['n']} & {qa['le0']} / {qa['n']} \\
 \bottomrule
 \end{{tabular}}
-\caption{{Distribution of pairwise Kendall \(\tau_b\) across the {nv['n']} pilot
+\caption{{Distribution of pairwise Kendall's \(\tau_b\) across the {nv['n']} pilot
 candidate-pairs on each dataset under gold scoring.
 Statistics use 10{{,}}000 bootstrap resamples and permutation shuffles
 with add-one smoothing~\cite{{dror2018hitchhiker}}.}}
