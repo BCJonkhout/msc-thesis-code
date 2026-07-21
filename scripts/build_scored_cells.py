@@ -137,6 +137,21 @@ def main() -> int:
                 n += 1
     print(f"wrote {n} scored cells -> {out_dir / 'scored_cells.jsonl'}\n")
 
+    # QASPER repeat stability: within-question SD of Answer-F1 across the 5
+    # repeats, averaged per architecture (the QASPER analogue of the NovelQA
+    # repeat-identity rate; consumed by tables_main_study.py as a macro).
+    spread = {}
+    for a in ARCHS:
+        sds = [statistics.pstdev(list(qasper[k][a].values()))
+               for k in qasper if a in qasper[k] and len(qasper[k][a]) > 1]
+        spread[a] = statistics.mean(sds) if sds else 0.0
+    (out_dir / "repeat_spread.json").write_text(json.dumps({
+        "qasper_mean_within_question_sd": spread,
+        "qasper_max_arch_sd": max(spread.values()),
+    }, indent=2), encoding="utf-8")
+    print(f"QASPER within-question repeat SD by arch: "
+          + ", ".join(f"{a}={spread[a]:.4f}" for a in ARCHS))
+
     def acc_eval(c):
         kept = {k: v for k, v in c.items() if k[0] not in EXCLUDE}
         return sum(kept.values()) / len(kept) if kept else 0.0

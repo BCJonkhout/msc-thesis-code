@@ -381,6 +381,9 @@ def macros() -> None:
         f"\\newcommand{{\\docTokensQasperK}}{{{round(dt['qasper'] / 1000)}}}",
         f"\\newcommand{{\\docLenRatio}}{{{round((round(dt['novelqa'] / 10000) * 10) / round(dt['qasper'] / 1000))}}}",
         f"\\newcommand{{\\repeatIdentityMinN}}{{{repeat_identity_min_novel():.1f}}}",
+        # QASPER analogue of the identity rate: worst-architecture mean
+        # within-question SD of Answer-F1 across the five repeats.
+        f"\\newcommand{{\\qasperRepeatSdMax}}{{{json.loads((MS / 'repeat_spread.json').read_text(encoding='utf-8'))['qasper_max_arch_sd']:.3f}}}",
         f"\\newcommand{{\\storagePctFlat}}{{{storage_pct('flat')}}}",
         f"\\newcommand{{\\storagePctNaive}}{{{storage_pct('naive_rag')}}}",
         f"\\newcommand{{\\storagePctRaptor}}{{{storage_pct('raptor')}}}",
