@@ -98,7 +98,9 @@ def fig_pareto() -> None:
     # Per-architecture label offsets (in points) keep the close QASPER Naive/Flat pair
     # from colliding; dominated methods are shown by hollow markers + the legend, so no
     # inline "(dominated)" tags are needed. Clean per-panel x-ticks (plain numbers).
-    LP = {"flat": (5, 6, "left", "bottom"), "naive_rag": (-5, -6, "right", "top"),
+    # Naive RAG is the leftmost (cheapest) point; label it below-centre rather than
+    # to the left, so its text does not run into the y-axis title.
+    LP = {"flat": (5, 6, "left", "bottom"), "naive_rag": (0, -9, "center", "top"),
           "raptor": (0, -9, "center", "top"), "graphrag": (0, -9, "center", "top")}
     TICKS = {"qasper": [0.3, 0.5, 1, 2, 3], "novelqa": [0.3, 1, 3, 10, 30]}
     sf = ScalarFormatter(); sf.set_scientific(False)
@@ -123,14 +125,17 @@ def fig_pareto() -> None:
         ax.set_xlabel("Deployment cost (USD, log scale)")
         ax.set_ylabel(DS_METRIC[ds])
         ax.set_title(DS_SHORT[ds], fontsize=10)
-        ax.margins(x=0.20, y=0.22)
+        ax.margins(x=0.28, y=0.22)
     handles = [Line2D([0], [0], color="0.6", lw=1.1, label="Pareto frontier"),
                Line2D([0], [0], marker="o", color="0.3", linestyle="none",
                       markerfacecolor="0.3", label="on frontier"),
                Line2D([0], [0], marker="^", color="0.3", linestyle="none",
                       markerfacecolor="white", markeredgecolor="0.3", label="dominated")]
-    fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.08))
-    fig.tight_layout()
+    # Reserve a band at the bottom for the shared legend, THEN place it there.
+    # tight_layout must run first (it ignores fig.legend); adding the legend before
+    # it, or without reserving space via rect, lands the legend on the x-axis titles.
+    fig.tight_layout(rect=(0, 0.09, 1, 1))
+    fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, 0.01))
     _save(fig, "pareto_cost_quality")
 
 
