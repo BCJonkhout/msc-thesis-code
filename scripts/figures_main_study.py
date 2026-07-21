@@ -125,7 +125,8 @@ def fig_pareto() -> None:
         ax.set_xlabel("Deployment cost (USD, log scale)")
         ax.set_ylabel(DS_METRIC[ds])
         ax.set_title(DS_SHORT[ds], fontsize=10)
-        ax.margins(x=0.28, y=0.22)
+        # Extra left headroom so the leftmost point's centred label clears the y-axis.
+        ax.margins(x=0.45, y=0.22)
     handles = [Line2D([0], [0], color="0.6", lw=1.1, label="Pareto frontier"),
                Line2D([0], [0], marker="o", color="0.3", linestyle="none",
                       markerfacecolor="0.3", label="on frontier"),
