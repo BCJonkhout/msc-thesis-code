@@ -380,7 +380,9 @@ def write_pairwise_latex(results):
         r"percentile $95\%$ CI on the mean difference; two-sided bootstrap $p$ "
         r"with the Holm--Bonferroni adjusted $p_{\mathrm{Holm}}$ over the six "
         "tests per dataset; clusters are papers for QASPER and novels for "
-        r"NovelQA). A pair whose $95\%$ CI includes zero is statistically tied."
+        r"NovelQA). A pair whose $95\%$ CI includes zero is statistically tied. "
+        r"$^{\dagger}$~significant by the interval rule but not after the "
+        r"Holm correction."
     )
 
     lines = []
@@ -403,7 +405,8 @@ def write_pairwise_latex(results):
                 f"{ARCH_LABEL[p['a']]} vs {ARCH_LABEL[p['b']]} & "
                 f"{p['mean_diff']:+.3f} & "
                 f"[{p['ci_low']:+.3f}, {p['ci_high']:+.3f}] & "
-                f"{fmt_p(p['p_value'])} & {fmt_p(p['p_holm'])} & {p['verdict']} \\\\"
+                f"{fmt_p(p['p_value'])} & {fmt_p(p['p_holm'])} & {p['verdict']}"
+                f"{'$^{{\dagger}}$' if p['verdict'] == 'significant' and not p['significant_holm'] else ''} \\\\"
             )
     lines.append(r"\bottomrule")
     lines.append(r"\end{tabular}")
