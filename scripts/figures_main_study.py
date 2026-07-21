@@ -149,9 +149,11 @@ def fig_accuracy() -> None:
                     ha="center", va="bottom", fontsize=8.4)
         floor = FLOOR[ds]
         ax.axhline(floor, color="0.3", ls="--", lw=1.1, zorder=3)
-        # small right-edge label; x in axes fraction so it hugs the edge
-        ax.text(0.985, floor, "closed-book floor",
-                transform=ax.get_yaxis_transform(), ha="right",
+        # small left-edge label; x in axes fraction so it hugs the edge
+        # (left side keeps it clear of the GraphRAG bar, whose top nearly
+        # coincides with the NovelQA floor)
+        ax.text(0.015, floor, "closed-book floor",
+                transform=ax.get_yaxis_transform(), ha="left",
                 va="bottom" if ds == "qasper" else "top",
                 fontsize=7.4, color="0.3",
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=1.2))
