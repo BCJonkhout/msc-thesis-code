@@ -77,11 +77,11 @@ def cost_table() -> None:
 \caption{{Per-architecture deployment cost in USD, computed \emph{{within each dataset}}
 (standard card): the one-time build cost (the per-document $C_{{\text{{build}}}}$ summed
 over the dataset's documents), the answering cost summed over its queries, their sum
-(Deploy), and the marginal per-query answering cost $C_{{\text{{query}}}}$
+(Total), and the marginal per-query answering cost $C_{{\text{{query}}}}$
 (m\$, $10^{{-3}}$~USD).}}\label{{tab:results-cost-quality}}
 \begin{{tabular}}{{lrrrr}}
 \toprule
- & Build & Answer & Deploy & $C_{{\text{{query}}}}$ \\
+ & Build & Answer & Total & $C_{{\text{{query}}}}$ \\
 Architecture & (USD) & (USD) & (USD) & (m\$) \\
 \midrule
 \multicolumn{{5}}{{l}}{{\textit{{QASPER}} ($\approx{qd:.0f}$ questions/paper)}} \\
@@ -134,7 +134,7 @@ cost, not the deployment total. All values in USD.}}\label{{tab:results-cost-dec
 \toprule
  & \multicolumn{{2}}{{c}}{{Build}} & \multicolumn{{2}}{{c}}{{Answer}} & & \\
 \cmidrule(lr){{2-3}}\cmidrule(lr){{4-5}}
-Architecture & LLM & embed & LLM & embed & Deploy & Storage \\
+Architecture & LLM & embed & LLM & embed & Total & Storage \\
  & (USD) & (USD) & (USD) & (USD) & (USD) & (USD) \\
 \midrule
 {rows_tex}
