@@ -460,7 +460,8 @@ def main() -> None:
         f"\\newcommand{{\\errorHedgeGraph}}{{{hedge_flatgood['graphrag']}}}",
         f"\\newcommand{{\\errorHedgeBase}}{{{len(flat_good)}}}",
         f"\\newcommand{{\\errorNovelLosing}}{{{losing['novelqa']}}}",
-        f"\\newcommand{{\\errorNovelTotal}}{{{totals['novelqa']}}}",
+        # Thousands separator matches the \nNovelScored rendering of the same count.
+        f"\\newcommand{{\\errorNovelTotal}}{{{totals['novelqa']:,}}}".replace(",", "{,}"),
         f"\\newcommand{{\\errorAbstractionSpecific}}{{{abstr_specific['novelqa']}}}",
         # 3dp: the value sits near 0.10, where 2dp rounding erases the margin.
         f"\\newcommand{{\\errorQasperMaxGap}}{{{qmax:.3f}}}",
@@ -510,7 +511,8 @@ def main() -> None:
                 "RAPTOR and GraphRAG do not. Answers are the verbatim model outputs from the first "
                 "of the five repeats (run~0); for QASPER the gold column lists each annotator's "
                 "reference answer. Question and gold text are quoted verbatim from the "
-                "datasets, including any typographical errors.}"
+                "datasets, including any typographical errors; long texts are shortened "
+                "for space, and a trailing ellipsis marks the table's own truncation.}"
                 "\\label{tab:results-error-examples}",
                 "{\\footnotesize", "\\begin{tabularx}{\\linewidth}{p{0.34\\linewidth}p{0.10\\linewidth}X}",
                 "\\toprule", "Question & Gold & Flat / Naive RAG / RAPTOR / GraphRAG \\\\", "\\midrule"]
@@ -563,7 +565,7 @@ def main() -> None:
         {"times": "Counting (\\texttt{times})", "meaning": "Paraphrase (\\texttt{meaning})",
          "span": "Span (\\texttt{span})", "character": "Character", "settg": "Setting",
          "relat": "Relational (\\texttt{relat})", "plot": "Plot"},
-        "NovelQA per-method accuracy by question aspect (full evaluation pool). "
+        "NovelQA per-method accuracy by question aspect (full scored pool). "
         + ci_note.format(cl="novels"),
         "tab:error-novelqa")
     complexity_tex = acc_table(
@@ -580,7 +582,7 @@ def main() -> None:
         qm, qn, qci, ["yes_no", "extractive", "abstractive", "unanswerable"],
         {"yes_no": "yes/no", "extractive": "extractive", "abstractive": "abstractive",
          "unanswerable": "unanswerable"},
-        "QASPER per-method Answer-F1 by answer type (full evaluation pool). "
+        "QASPER per-method Answer-F1 by answer type (full scored pool). "
         + ci_note.format(cl="papers"),
         "tab:error-qasper"), encoding="utf-8")
 

@@ -130,8 +130,8 @@ def cost_decomposition_table() -> None:
 one-time build cost (the per-document $C_{{\text{{build}}}}$ summed over all documents)
 and the answering cost (the per-query $C_{{\text{{query}}}}$ summed over all queries),
 each split into LLM API calls and local BGE-M3 embedding. Persistent-artifact storage
-($C_{{\text{{store}}}}$) is shown separately---it folds into the study-wide amortized
-cost, not the deployment total. All values in USD.}}\label{{tab:results-cost-decomp}}
+($C_{{\text{{store}}}}$) is shown separately and is excluded from the deployment
+totals. All values in USD.}}\label{{tab:results-cost-decomp}}
 \begin{{tabular}}{{lrrrrrr}}
 \toprule
  & \multicolumn{{2}}{{c}}{{Build}} & \multicolumn{{2}}{{c}}{{Answer}} & & \\
@@ -172,7 +172,7 @@ def breakeven_table() -> None:
 \caption{{Break-even density versus cache-aware Flat, computed \emph{{within each
 dataset}}. An architecture's one-time per-document build cost $C_{{\text{{build}}}}$
 amortizes over $n$ questions per document; the two $n^\star$ columns give the
-break-even density (Section~3.4) under the
+break-even density (Section~\ref{{sec:eval-protocol}}) under the
 standard card and the cache-discount card.}}\label{{tab:results-breakeven}}
 \begin{{tabular}}{{lrrcc}}
 \toprule
@@ -204,7 +204,7 @@ def memorization_table() -> None:
     body = rf"""\begin{{table}}[ht]
 \centering
 \caption{{Closed-book control: per-architecture answer quality against the closed-book
-floor (the same questions asked with the document withheld; Section~4.5). The lift column is the with-document score minus the closed-book
+floor (the same questions asked with the document withheld; Section~\ref{{sec:eval-protocol}}). The lift column is the with-document score minus the closed-book
 floor.}}\label{{tab:results-memorization}}
 \begin{{tabular}}{{lcccc}}
 \toprule
