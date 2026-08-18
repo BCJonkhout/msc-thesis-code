@@ -574,7 +574,9 @@ def main() -> None:
          "dtl": "Detail (\\texttt{dtl})"},
         "NovelQA per-method accuracy by the dataset's own complexity labels "
         "(single-hop, multi-hop, detail). Same CI method as "
-        "Table~\\ref{tab:error-novelqa}; $n$ is the number of questions in the subset.",
+        "Table~\\ref{tab:error-novelqa}; $n$ is the number of questions in the "
+        "subset. Accuracies are rounded to two decimals; gaps quoted in the "
+        "text are computed from the unrounded values.",
         "tab:error-novelqa-complexity", comment=False)
     (EXPORT / "mainstudy_error_appendix.tex").write_text(
         aspect_tex + "\n" + complexity_tex, encoding="utf-8")

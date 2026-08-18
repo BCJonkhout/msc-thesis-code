@@ -198,8 +198,10 @@ def memorization_table() -> None:
     rows = [f"Closed-book floor & {qa_floor:.2f} & --- & {nv_floor:.2f} & --- \\\\", r"\midrule"]
     for a in ARCHS:
         n, q = nv["per_arch"][a], qa["per_arch"][a]
-        rows.append(f"{LABEL[a]} & {q['answer_f1']:.2f} & {q['lift']:+.2f} & "
-                    f"{n['accuracy']:.2f} & {n['lift']:+.2f} \\\\")
+        # with-doc scores at 3dp to match the prose quality macros (\qFlatFone
+        # etc.); floors and lifts stay 2dp like their own prose macros.
+        rows.append(f"{LABEL[a]} & {q['answer_f1']:.3f} & {q['lift']:+.2f} & "
+                    f"{n['accuracy']:.3f} & {n['lift']:+.2f} \\\\")
     rows_tex = "\n".join(rows)
     body = rf"""\begin{{table}}[ht]
 \centering
